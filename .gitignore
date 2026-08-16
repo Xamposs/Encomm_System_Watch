@@ -1,0 +1,35 @@
+# ENCOMM SYSTEM WATCH — gitignore
+# dependencies
+node_modules/
+.venv/
+venv/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# build artifacts
+dist/
+build/
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# logs
+logs/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# temp
+tmp/
+*.tmp
+tools/shots/
