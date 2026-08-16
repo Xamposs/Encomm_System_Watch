@@ -101,6 +101,8 @@ class EtwTcpipProvider(NetworkActivityProvider):
             level="TIER0", source="NONE",
             detail="telemetry provider not started", elevation_required=True,
         )
+        # read-only diagnostics (exposed via /api/telemetry/debug)
+        self._counters = {"events_received": 0, "events_dropped": 0, "events_drained": 0}
 
     # ------------------------------------------------------------ lifecycle
 
@@ -213,8 +215,10 @@ class EtwTcpipProvider(NetworkActivityProvider):
             )
             with self._lock:
                 self._queue.append(ev)
+                self._counters["events_received"] += 1
                 if len(self._queue) > 20000:  # bounded memory under load
                     self._queue.popleft()
+                    self._counters["events_dropped"] += 1
         except Exception:
             # a malformed event must never kill the ETW consumer thread
             pass
@@ -223,7 +227,16 @@ class EtwTcpipProvider(NetworkActivityProvider):
         with self._lock:
             out = list(self._queue)
             self._queue.clear()
+            self._counters["events_drained"] += len(out)
         return out
+
+    def queue_depth(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
+    def counters(self) -> dict:
+        with self._lock:
+            return dict(self._counters)
 
 
 class AdapterTotalsSampler:

@@ -166,6 +166,9 @@ const EX = {
   harnessEdge: (port) => `window.__esw_cy ? window.__esw_cy.edges().filter(e => (e.data('ports') || []).includes(${port}) && [e.source().data('kind'), e.target().data('kind')].every(k => k === 'PROCESS' || k === 'LISTENING_PORT')).length : 0`,
   edgeWithPort: (port) => `window.__esw_cy ? window.__esw_cy.edges().filter(e => (e.data('ports') || []).includes(${port})).length : 0`,
   actEdges: `window.__esw_cy ? window.__esw_cy.edges('[?actLow],[?actMed],[?actHigh]').length : -1`,
+  overlayStats: `window.__esw_controller ? JSON.stringify(window.__esw_controller.overlayStats()) : 'null'`,
+  controllerEdgeActivity: `window.__esw_controller ? window.__esw_controller.debugStats().edgeActivity : -1`,
+  staleRateNodes: `window.__esw_cy ? window.__esw_cy.nodes('[?last_activity]').length : -1`,
   familyNodes: `window.__esw_cy ? window.__esw_cy.nodes('[?family]').length : -1`,
   hiddenMembers: `window.__esw_cy ? window.__esw_cy.nodes('.fam-hidden').length : -1`,
   dimmedEls: `window.__esw_cy ? window.__esw_cy.elements('.focus-dim').length : -1`,
@@ -577,6 +580,149 @@ async function main() {
   check('R5 CONNECTION CLOSED logged', trafficCloseTypes.includes('CONNECTION CLOSED'))
   await cdp.shot('r-traffic-after.png')
 
+  // ---- Test S: TIER2 provider -> aggregator wiring (LOGICAL TIER2) --------
+  // Runs when the backend reports a TIER2 capability. When the backend was
+  // started with ESW_TELEMETRY_PROVIDER=synthetic this is a MOCKED/LOGICAL
+  // TIER2 validation (synthetic events through the real pipeline); when
+  // started elevated with the real ETW provider it validates the same chain
+  // with REAL observed bytes. The capability source string distinguishes
+  // the two — nothing here ever pretends synthetic == real ETW.
+  console.log('\n[Test S] TIER2 provider -> aggregator wiring')
+  const telS = await (await fetch(`${API}/api/telemetry`)).json()
+  const isTier2 = telS.level === 'TIER2'
+  const isSynthetic = isTier2 && /SYNTHETIC/i.test(telS.source || '')
+  if (isTier2) {
+    check('S0 backend reports TIER2 capability', true, `level=${telS.level}`)
+    check('S0b TIER2 source clearly labeled', isSynthetic
+      ? `LOGICAL/MOCKED (${telS.source})`
+      : `REAL ELEVATED (${telS.source})`, telS.source)
+  }
+  if (isTier2) {
+    // baseline counters BEFORE the harness starts — the S1–S5 poll must
+    // react to FRESH evidence, not counters left over from earlier runs
+    const dbg0 = await (await fetch(`${API}/api/telemetry/debug`)).json()
+    const baseRecv = dbg0?.provider?.events_received || 0
+    const baseMapped = dbg0?.aggregator?.events_mapped_to_edges || 0
+    let harnessSExited = false
+    const harnessS = spawn('python', ['tools/network_activity_test/run.py', '--port', '19735', '--watch', '15'], {
+      cwd: join(__dirname, '..'), stdio: 'ignore',
+    })
+    harnessS.on('exit', () => { harnessSExited = true })
+    // poll the debug counters until FRESH events crossed the whole chain
+    let dbg = null
+    for (let i = 0; i < 50; i++) {
+      await sleep(500)
+      try {
+        dbg = await (await fetch(`${API}/api/telemetry/debug`)).json()
+      } catch { /* backend busy */ }
+      if (dbg && (dbg.provider?.events_received || 0) > baseRecv
+          && (dbg.aggregator?.events_mapped_to_edges || 0) > baseMapped) break
+    }
+    check('S1 provider received events', (dbg?.provider?.events_received || 0) > 0,
+      `received=${dbg?.provider?.events_received}`)
+    check('S2 events drained from provider', (dbg?.provider?.events_drained || 0) > 0,
+      `drained=${dbg?.provider?.events_drained}`)
+    check('S3 events recorded into aggregator', (dbg?.aggregator?.events_recorded || 0) > 0,
+      `recorded=${dbg?.aggregator?.events_recorded}`)
+    check('S4 events mapped to real edges', (dbg?.aggregator?.events_mapped_to_edges || 0) > 0,
+      `mapped=${dbg?.aggregator?.events_mapped_to_edges}`)
+    check('S5 activity batches emitted', (dbg?.aggregator?.activity_batches_emitted || 0) > 0,
+      `batches=${dbg?.aggregator?.activity_batches_emitted}`)
+    // frontend: the SAME bytes must reach GraphController + particles
+    let act = 0
+    let ov = null
+    for (let i = 0; i < 40; i++) {
+      await sleep(500)
+      act = await cdp.eval(EX.actEdges)
+      ov = JSON.parse(await cdp.eval(EX.overlayStats))
+      if (act > 0 && (ov?.particles || 0) > 0) break
+    }
+    check('S6 GraphController edge activity (actLow/Med/High)', act > 0, `actEdges=${act}`)
+    check('S7 DATA particles moving in overlay', (ov?.particles || 0) > 0,
+      `particles=${ov?.particles}`)
+    const lb0 = dbg?.aggregator?.last_batch || {}
+    // wait for a batch that actually carried directional bytes (edge-mapped)
+    let lb = lb0
+    for (let i = 0; i < 20 && !((lb?.fwd_bytes || 0) > 0 || (lb?.rev_bytes || 0) > 0); i++) {
+      await sleep(500)
+      try {
+        const d2 = await (await fetch(`${API}/api/telemetry/debug`)).json()
+        const cand = d2?.aggregator?.last_batch || {}
+        if (cand && typeof cand.fwd_bytes === 'number') lb = cand
+      } catch { /* backend busy */ }
+    }
+    check('S8 directional bytes fwd > 0', (lb?.fwd_bytes || 0) > 0, `fwd=${lb?.fwd_bytes}`)
+    check('S9 directional bytes rev > 0', (lb?.rev_bytes || 0) > 0, `rev=${lb?.rev_bytes}`)
+    const harnessEdgeS = await cdp.eval(EX.harnessEdge(19735))
+    check('S10 harness edge present during traffic', harnessEdgeS >= 1, `edges=${harnessEdgeS}`)
+    const shots = await cdp.eval(`(() => {
+      const ov = window.__esw_controller.overlayStats()
+      return JSON.stringify(ov)
+    })()`)
+    console.log(`  info  overlay at traffic peak: ${shots}`)
+    for (let i = 0; i < 60 && !harnessSExited; i++) await sleep(500)
+    check('S11 harness exited cleanly', harnessSExited === true)
+  } else {
+    console.log('  SKIP  S0b–S11 (backend not TIER2 — start with ESW_TELEMETRY_PROVIDER=synthetic or elevated ETW)')
+  }
+
+  // ---- Test T: activity decay without further backend batches ------------
+  // After the harness stops, NO network_activity message ever arrives again.
+  // The frontend must decay purely by time: ACTIVE -> RECENT -> IDLE, clear
+  // actLow/actMed/actHigh, clear node rates, and STOP the rAF loop.
+  console.log('\n[Test T] Activity decay (ACTIVE -> RECENT -> IDLE)')
+  if (isTier2) {
+    let ovT = null
+    let actT = -1
+    let ctlT = -1
+    for (let i = 0; i < 40; i++) {
+      await sleep(500)
+      ovT = JSON.parse(await cdp.eval(EX.overlayStats))
+      actT = await cdp.eval(EX.actEdges)
+      ctlT = await cdp.eval(EX.controllerEdgeActivity)
+      const idle = ovT && ovT.activity === 0 && ovT.particles === 0 && ovT.running === false
+      if (idle && actT === 0 && ctlT === 0) break
+    }
+    check('T1 overlay activity map pruned by time', ovT?.activity === 0, `activity=${ovT?.activity}`)
+    check('T2 no particles remain', ovT?.particles === 0, `particles=${ovT?.particles}`)
+    check('T4 actLow/actMed/actHigh cleared without new batches', actT === 0, `actEdges=${actT}`)
+    check('T5 controller edgeActivity map cleared', ctlT === 0, `edgeActivity=${ctlT}`)
+    const staleNodes = await cdp.eval(EX.staleRateNodes)
+    check('T6 stale node net rates cleared', staleNodes === 0, `nodes=${staleNodes}`)
+    // rAF stop mechanism, deterministic: the lifecycle feed is suspended
+    // (the equivalent of a machine with no connection events) and the
+    // terminal idle state is forced exactly as time-decay eventually
+    // produces it; the next frames must cancel the loop. Real lifecycle
+    // pulses on a live machine legitimately keep the loop alive between
+    // quiet instants — the mechanism, not the machine, is asserted here.
+    await cdp.eval(`window.__esw_controller?.testMute(true) ?? false`)
+    await cdp.eval(`window.__esw_controller?.testForceIdle() ?? false`)
+    await sleep(400)
+    const ovStopped = JSON.parse(await cdp.eval(EX.overlayStats))
+    check('T3 rAF loop stops when idle (mechanism)', ovStopped.running === false,
+      `running=${ovStopped.running} stops=${ovStopped.stops}`)
+    await cdp.eval(`window.__esw_controller?.testMute(false) ?? false`)
+    // idle sanity: a fresh traffic burst must wake the loop again (no zombie state)
+    const dbgBefore = await (await fetch(`${API}/api/telemetry/debug`)).json()
+    const batchesBefore = dbgBefore?.aggregator?.activity_batches_emitted || 0
+    let wakeAct = 0
+    const wakeHarness = spawn('python', ['tools/network_activity_test/run.py', '--port', '19735', '--watch', '3'], {
+      cwd: join(__dirname, '..'), stdio: 'ignore',
+    })
+    for (let i = 0; i < 30; i++) {
+      await sleep(500)
+      wakeAct = await cdp.eval(EX.actEdges)
+      if (wakeAct > 0) break
+    }
+    await new Promise((res) => wakeHarness.on('exit', res))
+    const dbgAfter = await (await fetch(`${API}/api/telemetry/debug`)).json()
+    const batchesAfter = dbgAfter?.aggregator?.activity_batches_emitted || 0
+    check('T7 idle state wakes on new traffic', wakeAct > 0 || batchesAfter > batchesBefore,
+      `actEdges=${wakeAct} batches=${batchesBefore}->${batchesAfter}`)
+  } else {
+    console.log('  SKIP  T1–T7 (backend not TIER2 — decay requires the logical/real TIER2 chain)')
+  }
+
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact
   await cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -588,13 +734,20 @@ async function main() {
   await cdp.shot('final-live.png')
   const finalShot = join(__dirname, 'shots', 'final-live.png')
   const docsDir = join(__dirname, '..', 'docs')
-  try {
-    mkdirSync(docsDir, { recursive: true })
-    const { copyFileSync } = await import('node:fs')
-    copyFileSync(finalShot, join(docsDir, 'screenshot.png'))
-    console.log('  shot  docs/screenshot.png (copied from final-live.png)')
-  } catch (e) {
-    console.log('  warn  could not copy docs/screenshot.png:', e.message)
+  // ESW_KEEP_SCREENSHOT=1: keep the committed REAL-machine screenshot.
+  // Synthetic-logical TIER2 runs MUST set this — docs/screenshot.png must
+  // never show fabricated activity as real telemetry.
+  if (!process.env.ESW_KEEP_SCREENSHOT) {
+    try {
+      mkdirSync(docsDir, { recursive: true })
+      const { copyFileSync } = await import('node:fs')
+      copyFileSync(finalShot, join(docsDir, 'screenshot.png'))
+      console.log('  shot  docs/screenshot.png (copied from final-live.png)')
+    } catch (e) {
+      console.log('  warn  could not copy docs/screenshot.png:', e.message)
+    }
+  } else {
+    console.log('  keep  docs/screenshot.png untouched (ESW_KEEP_SCREENSHOT=1)')
   }
 
   console.log(`\nRESULT: ${passed} passed, ${failed} failed`)

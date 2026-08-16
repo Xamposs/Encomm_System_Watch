@@ -2,6 +2,103 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.2.1] — 2026-08-16
+
+Tier-2 traffic pipeline correctness and activity-decay checkpoint.
+
+### Fixed
+
+- **ETW provider → aggregator wiring (Bug #1)** — the runtime telemetry
+  loop called `aggregator.flush()` but never drained the provider, so real
+  ETW events accumulated in the provider's bounded queue and never reached
+  the WebSocket even when TIER2 was active. The loop now runs
+  `_telemetry_tick()` each window: `provider.drain() → record_many() →
+  flush()`. Regression-guarded by a full-chain test (fake ETW event →
+  provider callback → drain → record_many → aggregator → non-zero
+  directional edge bytes).
+- **Frontend activity decay (Bug #2)** — `EdgePulseOverlay` only pruned
+  stale activity when the next `network_activity` batch arrived; since the
+  backend stops sending batches when traffic stops, stale entries (and the
+  rAF loop) could persist indefinitely. The rAF loop now prunes the
+  activity map by wall-clock age (`RECENT_MS`), so ACTIVE → RECENT → IDLE
+  happens with no further backend packets, and the loop cancels its own
+  rAF when activity/particles/pulses/recents are all empty.
+- **Edge visual-state decay (Bug #2b)** — `GraphController`'s
+  `actLow/actMed/actHigh` styling (edge brightness/thickness/glow) is now
+  cleared by one shared 1 s activity-decay scheduler (never a timer per
+  edge) purely by time, and stale per-process ↓/↑ net rates are cleared
+  with it. The `applyActivity` prune also strips styling when it drops a
+  map entry (previously a stale edge could stay lit forever).
+- **Provider-failure resilience** — the telemetry health probe is
+  exception-guarded and safe when capability state is unset; a crashing
+  provider can no longer kill the monitoring loop. Tested with a
+  fail-then-recover provider (loop survives, telemetry flows again).
+
+### Added
+
+- **Batch ingestion** — `ActivityAggregator.record_many()` ingests drained
+  provider events with a single lock acquisition per ~200 ms window (no
+  lock-per-event under high traffic).
+- **Telemetry debug counters** — `GET /api/telemetry/debug` (localhost-only,
+  counts never payloads): provider events received/drained/dropped + queue
+  depth, aggregator events recorded/mapped-to-edges/mapped-to-nodes/
+  unattributed/batches-emitted, last batch's directional byte totals.
+- **Synthetic logical-TIER2 provider** — `backend/app/telemetry/synthetic.py`,
+  activated ONLY via `ESW_TELEMETRY_PROVIDER=synthetic`. Scans the real
+  socket table (2 Hz, so it never interferes with the collector's psutil
+  attribution), caches matching ESTABLISHED loopback tuples for a target
+  port, and emits fabricated metadata events for those real tuples through
+  the full production chain. Capability is labeled `SYNTHETIC TEST PROVIDER
+  (logical)` — never presented as real ETW, never the default.
+- **`tools/verify_tier2.ps1`** — manual elevated verification script: never
+  auto-elevates, prints the required Administrator message and exits
+  cleanly when non-admin; when elevated, checks `/api/telemetry`, runs the
+  traffic harness, and asserts the full counter chain (PASS/FAIL).
+- **Tests** — provider→aggregator integration tests (the missing-wiring
+  guard), runtime-tick wiring test, provider-failure recovery test, queue
+  boundedness/drop counting, attribution counters, synthetic-chain test,
+  debug-endpoint shape test. Backend suite: 61 → **69 tests**.
+- **Acceptance Tests S and T** — S: provider → drain → aggregator →
+  WebSocket → GraphController → particles with bidirectional bytes (runs
+  for any TIER2 backend, distinguishes LOGICAL/SYNTHETIC from REAL
+  ELEVATED via the capability source); T: decay — activity map empties,
+  particles stop, act* styles clear, node rates clear, rAF stop mechanism
+  verified deterministically (test-only `testMute`/`testForceIdle` UI
+  hooks), idle state wakes on new traffic. Screenshot guard
+  (`ESW_KEEP_SCREENSHOT=1`) keeps `docs/screenshot.png` a real capture.
+
+### Verified
+
+- Backend: **69 pytest cases green** (`python -m pytest tests -q`).
+- Frontend: `npm run typecheck` and `npm run build` green.
+- Acceptance (live Windows 11, production build):
+  - NORMAL UNELEVATED RUN: **58/58** (A–R; TIER0, elevation required,
+    zero fabricated per-edge activity, adapter totals; S/T correctly
+    skipped).
+  - SYNTHETIC LOGICAL TIER2 RUN (`ESW_TELEMETRY_PROVIDER=synthetic`):
+    **76/76** (A–T; S: 7 704 events recorded → 7 132 mapped to edges,
+    224 batches, fwd=rev=49 152 B in the last batch, particles moving;
+    T: full ACTIVE → RECENT → IDLE decay, rAF stop mechanism, wake on
+    new traffic).
+- Counters observed (synthetic run): provider received 7 736 / drained
+  7 704 / dropped 0; aggregator recorded 7 704, mapped to edges 7 132,
+  unattributed 0, batches emitted 224; queue depth 0 throughout.
+
+### Known limitations (0.2.1)
+
+- **REAL Windows ETW TIER2 has NOT been validated end-to-end** — the
+  session was not elevated, so per-edge telemetry truthfully reports
+  TIER0 with `elevation_required`. The synthetic provider proves the
+  production chain logically; a future elevated Administrator run
+  (`tools/verify_tier2.ps1`) is required to validate real
+  Microsoft-Windows-TCPIP ETW bytes.
+- TCP only for per-edge byte attribution (ETW TCPIP provider); UDP sockets
+  show lifecycle activity only.
+- On a busy machine the pulse overlay's rAF loop may keep running on real
+  lifecycle events (that is designed behavior); DATA particles, edge
+  styles and activity state still fully decay, and the loop stops whenever
+  the event feed goes quiet.
+
 ## [0.2.0] — 2026-08-16
 
 Live network traffic and topology visual polish.

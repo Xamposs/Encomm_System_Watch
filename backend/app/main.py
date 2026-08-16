@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -66,9 +67,30 @@ diff_engine = DiffEngine(cfg)
 
 # ---- network telemetry ----------------------------------------------------
 telemetry_enabled = cfg.telemetry_enabled and not cfg.demo_mode
+
+
+def _make_telemetry_provider():
+    """Select the network activity source.
+
+    ``ESW_TELEMETRY_PROVIDER`` (default ``etw``):
+      - ``etw``       real Microsoft-Windows-TCPIP ETW (TIER2 when elevated)
+      - ``synthetic`` test-only provider for LOGICAL TIER2 validation
+                      (clearly labeled SYNTHETIC; never a real observation)
+      - ``off``       disable the provider entirely
+    """
+    kind = os.environ.get("ESW_TELEMETRY_PROVIDER", "etw").strip().lower()
+    if kind == "off":
+        return None
+    if kind == "synthetic":
+        from .telemetry.synthetic import SyntheticActivityProvider
+
+        return SyntheticActivityProvider()
+    return EtwTcpipProvider()
+
+
 aggregator = ActivityAggregator(cfg)
 adapter_sampler = AdapterTotalsSampler()
-telemetry_provider = EtwTcpipProvider() if telemetry_enabled else None
+telemetry_provider = _make_telemetry_provider() if telemetry_enabled else None
 
 _state = {
     "snapshot": None,
@@ -182,16 +204,35 @@ def _snapshot_message() -> dict:
     }
 
 
+def _telemetry_tick() -> tuple[list, list, list]:
+    """One telemetry window: drain provider -> batch-ingest -> flush.
+
+    This is the v0.2.1 wiring fix extracted as a unit: the provider's
+    bounded queue is drained and fed into the aggregator BEFORE the
+    ~200 ms window is flushed. Returns (items, burst_events, node_items).
+    Telemetry failures never propagate (the caller keeps the loop alive).
+    """
+    if telemetry_provider is not None:
+        events = telemetry_provider.drain()
+        if events:
+            aggregator.record_many(events)
+    return aggregator.flush()
+
+
 async def _telemetry_loop() -> None:
     """Flush aggregated network activity in small batches (~5 msg/s max).
 
-    Raw per-packet events never reach the WebSocket; only compact per-edge
-    batches do. Also watches provider health and demotes the capability tier
-    truthfully if the ETW session dies.
+    The loop is the ONLY place where the provider is drained into the
+    aggregator: each window it takes every buffered ETW event
+    (``provider.drain()``), batch-ingests them (``aggregator.record_many``,
+    a single lock acquisition), then flushes the ~200 ms window. Raw
+    per-packet events never reach the WebSocket; only compact per-edge
+    batches do. Also watches provider health and demotes the capability
+    tier truthfully if the ETW session dies.
     """
     while True:
         try:
-            items, bursts, node_items = aggregator.flush()
+            items, bursts, node_items = _telemetry_tick()
         except Exception:  # noqa: BLE001 — telemetry must never kill the app
             items, bursts, node_items = [], [], []
         if items or node_items:
@@ -204,17 +245,21 @@ async def _telemetry_loop() -> None:
             })
         if bursts:
             stream.publish([e.to_dict() for e in bursts])
-        if telemetry_provider is not None and _state.get("telemetry", {}).get("level") == "TIER2":
-            if not telemetry_provider.alive():
-                cap = Capability(
-                    level="TIER0", source="NONE",
-                    detail="ETW session ended; falling back to socket lifecycle",
-                    elevation_required=True,
-                )
-                aggregator.set_capability(cap)
-                _state["telemetry"] = cap.to_dict()
-                log.warning("telemetry provider died — demoted to TIER0")
-                stream.publish([_capability_event(cap, "TEL-DEAD")])
+        # provider health probe — must never kill the loop either
+        try:
+            if telemetry_provider is not None and _capability_dict().get("level") == "TIER2":
+                if not telemetry_provider.alive():
+                    cap = Capability(
+                        level="TIER0", source="NONE",
+                        detail="ETW session ended; falling back to socket lifecycle",
+                        elevation_required=True,
+                    )
+                    aggregator.set_capability(cap)
+                    _state["telemetry"] = cap.to_dict()
+                    log.warning("telemetry provider died — demoted to TIER0")
+                    stream.publish([_capability_event(cap, "TEL-DEAD")])
+        except Exception:  # noqa: BLE001 — health probing must never kill the app
+            log.warning("telemetry health probe failed", exc_info=True)
         await asyncio.sleep(max(0.05, cfg.telemetry_flush_ms / 1000.0))
 
 
@@ -275,7 +320,7 @@ async def lifespan(_: FastAPI):
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -327,6 +372,30 @@ async def api_state() -> StateResponse:
 async def api_telemetry() -> dict:
     """Current network telemetry capability (honest: what actually works)."""
     return _capability_dict()
+
+
+@app.get("/api/telemetry/debug")
+async def api_telemetry_debug() -> dict:
+    """Read-only telemetry diagnostics: counters along the whole chain.
+
+    Localhost-only like the rest of the backend. Exposes counts, never
+    payloads: how many events the provider received/drained/dropped, how
+    many the aggregator recorded/mapped, queue depth, and the last
+    non-empty batch's directional byte totals.
+    """
+    prov: dict = {}
+    if telemetry_provider is not None:
+        prov = telemetry_provider.counters()
+        prov["queue_depth"] = telemetry_provider.queue_depth()
+        prov["alive"] = telemetry_provider.alive()
+    agg = aggregator.counters()
+    return {
+        "telemetry": _capability_dict(),
+        "provider": prov,
+        "aggregator": agg,
+        "edges_tracked": len(aggregator.edge_states()),
+        "processes_tracked": len(aggregator.process_states()),
+    }
 
 
 @app.websocket("/ws")

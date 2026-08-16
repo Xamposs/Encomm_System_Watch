@@ -44,8 +44,8 @@ const MAX_PARTICLES = 140
 const MAX_PER_EDGE = 6
 
 // activity freshness windows (ms) — mirrors the backend decay model
-const ACTIVE_MS = 500
-const RECENT_MS = 5000
+export const ACTIVE_MS = 500
+export const RECENT_MS = 5000
 
 // spawn cadence per activity level (ms between particle launches per edge)
 const SPAWN_INTERVAL: Record<number, number> = { 1: 1600, 2: 700, 3: 300 }
@@ -76,6 +76,8 @@ export class EdgePulseOverlay {
   private particles: DataParticle[] = []
   private running = false
   private raf = 0
+  private stops = 0
+  private testMuted = false
   private ro: ResizeObserver
 
   constructor(
@@ -109,6 +111,7 @@ export class EdgePulseOverlay {
   // ------------------------------------------------------ lifecycle pulses
 
   pulse(edgeId: string, kind: PulseKind): void {
+    if (this.testMuted) return
     if (this.pulses.has(edgeId)) this.pulses.delete(edgeId)
     this.pulses.set(edgeId, {
       start: performance.now(),
@@ -125,6 +128,7 @@ export class EdgePulseOverlay {
   }
 
   markRecent(edgeId: string, ms: number): void {
+    if (this.testMuted) return
     this.recent.set(edgeId, performance.now() + ms)
     while (this.recent.size > MAX_RECENT) {
       const first = this.recent.keys().next().value as string | undefined
@@ -211,6 +215,16 @@ export class EdgePulseOverlay {
     this.raf = requestAnimationFrame(this.loop)
     const now = performance.now()
 
+    // --- time-based decay (v0.2.1 fix) -------------------------------------
+    // The backend only sends network_activity while activity exists, so a
+    // stale entry can never rely on the NEXT batch to be removed. The rAF
+    // loop prunes by wall-clock age: once an edge has been silent for
+    // RECENT_MS it leaves the map, `hasData` goes false, and the loop can
+    // stop entirely. This is visual decay, NOT a fake zero-rate observation.
+    for (const [edgeId, st] of this.activity) {
+      if (now - st.lastActivity > RECENT_MS) this.activity.delete(edgeId)
+    }
+
     // spawn data particles for ACTIVE edges (actual observed traffic)
     for (const [edgeId, st] of this.activity) {
       const age = now - st.lastActivity
@@ -239,6 +253,7 @@ export class EdgePulseOverlay {
     if (!hasData && !hasRecent && !hasPulses && this.particles.length === 0) {
       cancelAnimationFrame(this.raf)
       this.running = false
+      this.stops += 1
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
       return
     }
@@ -342,5 +357,51 @@ export class EdgePulseOverlay {
     cancelAnimationFrame(this.raf)
     this.ro.disconnect()
     this.canvas.remove()
+  }
+
+  /**
+   * TEST ONLY (acceptance Test T3): force the terminal idle state — empty
+   * activity/particles/pulses/recent — exactly as time-decay eventually
+   * does, so the rAF stop branch can be verified deterministically even on
+   * a machine whose real lifecycle events keep the loop alive. Clears ONLY
+   * canvas/UI state; never touches telemetry or the DOM graph.
+   */
+  testForceIdle(): void {
+    this.activity.clear()
+    this.particles = []
+    this.pulses.clear()
+    this.recent.clear()
+  }
+
+  /**
+   * TEST ONLY (acceptance Test T3): suspend the lifecycle pulse/recent
+   * feed — the equivalent of a machine with no connection events — and
+   * force the terminal idle state, so the rAF stop branch can be verified
+   * deterministically even on a machine whose real events keep the loop
+   * alive. Clears ONLY canvas/UI state; never touches telemetry or the
+   * DOM graph.
+   */
+  testMute(muted: boolean): void {
+    this.testMuted = muted
+    if (!muted) return
+    this.activity.clear()
+    this.particles = []
+    this.pulses.clear()
+    this.recent.clear()
+  }
+
+  /**
+   * Read-only diagnostics for acceptance tests / debugging: current
+   * run-state of the overlay (never exposes packet data).
+   */
+  stats(): { running: boolean; activity: number; particles: number; pulses: number; recent: number; stops: number } {
+    return {
+      running: this.running,
+      activity: this.activity.size,
+      particles: this.particles.length,
+      pulses: this.pulses.size,
+      recent: this.recent.size,
+      stops: this.stops,
+    }
   }
 }

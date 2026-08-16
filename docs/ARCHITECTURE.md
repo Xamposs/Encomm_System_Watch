@@ -24,23 +24,52 @@ FRONTEND STATE  (React hook + imperative graph controller)
 CYTOSCAPE GRAPH  (canvas pulse overlay on top)
 ```
 
-Network activity (v0.2) plugs into the same pipeline:
+Network activity (v0.2) plugs into the same pipeline — the v0.2.1 runtime
+chain is:
 
 ```
 WINDOWS NETWORK ACTIVITY SOURCE   (ETW Microsoft-Windows-TCPIP, if permitted)
         ↓
-ACTIVITY NORMALIZER              (pid + 4-tuple + direction + size; metadata only)
+EtwTcpipProvider ETW callback     (parse + normalize + append — lightweight only)
         ↓
-ACTIVITY AGGREGATOR              (200 ms windows, edge mapping, rates, bursts)
+PROVIDER BOUNDED QUEUE            (20 000 events; overflow drops are counted)
         ↓
-TOPOLOGY EDGE MAPPING            (tuple → edge evidence, rebuilt every tick)
+provider.drain()                  (the runtime loop's telemetry tick)
         ↓
-WEBSOCKET ACTIVITY BATCH         (network_activity, ≤ ~5 msg/s)
+ActivityAggregator.record_many()  (batch ingestion, ONE lock per window)
         ↓
-GraphController                  (per-edge activity state, decay)
+ACTIVITY AGGREGATOR               (200 ms windows, edge mapping, rates, bursts)
         ↓
-EdgePulseOverlay                 (directional particles, rAF, idle-stops)
+TOPOLOGY EDGE MAPPING             (tuple → edge evidence, rebuilt every tick)
+        ↓
+WEBSOCKET ACTIVITY BATCH          (network_activity, ≤ ~5 msg/s)
+        ↓
+GraphController                   (per-edge activity state + decay scheduler)
+        ↓
+EdgePulseOverlay                  (directional particles, rAF, idle-stops)
 ```
+
+The provider → aggregator wiring (drain → record_many) lives in
+`_telemetry_tick()` in `backend/app/main.py` and is the fix for the
+v0.2.0 missing-wiring bug: previously the ETW provider buffered events
+into its internal queue but nothing ever drained it, so real byte events
+never reached the aggregator or the WebSocket.
+
+Separate LOGICAL-TIER2 validation path (test-only, opt-in, never default):
+
+```
+SyntheticActivityProvider          (ESW_TELEMETRY_PROVIDER=synthetic ONLY)
+        ↓                          scans the REAL socket table at 2 Hz,
+        ↓                          caches matching loopback tuples (target
+        ↓                          port), emits fabricated metadata events
+        ↓                          (~100 Hz) for those REAL tuples only
+PROVIDER BOUNDED QUEUE → drain → record_many → aggregator → WS → graph
+```
+
+The synthetic provider is labeled `SYNTHETIC TEST PROVIDER (logical)` in
+the capability and is used exclusively to prove the production data path
+end-to-end without administrator privileges. It is NOT real ETW
+observation and must never be presented as one.
 
 ## Layer by layer
 
@@ -122,19 +151,33 @@ detection. **Tiers:**
   only), `Capability`, provider interface, per-edge/per-process rate state.
 - `windows_network.py` — `EtwTcpipProvider`: realtime ETW session on
   Microsoft-Windows-TCPIP via pywintrace; SEND/RECEIVE task names give
-  direction; payload bytes are never touched (only the size field). An
-  unelevated session fails with ERROR_ACCESS_DENIED — the provider detects
-  this, reports `elevation_required`, and the app stays on TIER0. SYSTEM
-  WATCH never auto-elevates. `AdapterTotalsSampler` — system-wide
-  down/up bps from per-interface counters (loopback excluded), labeled
-  separately from captured telemetry.
-- `activity_aggregator.py` — 200 ms aggregation windows; raw events are mapped
-  to topology edges via (pid, 4-tuple) evidence rebuilt each tick; per-edge
-  directional rates (1 s EMA) and activity levels; ACTIVE (< 500 ms) /
-  RECENT (< 5 s) / IDLE decay timestamps; per-process totals for the node
-  inspector/halo; conservative TRAFFIC_BURST detection. Events that cannot be
-  mapped to a specific edge are attributed to the owning process (node halo)
-  or dropped — never faked onto a random edge.
+  direction; payload bytes are never touched (only the size field). The
+  ETW callback only parses, normalizes and appends to a bounded 20 000-event
+  queue (overflow drops are counted) — no topology or WebSocket work on the
+  consumer thread. An unelevated session fails with ERROR_ACCESS_DENIED —
+  the provider detects this, reports `elevation_required`, and the app stays
+  on TIER0. SYSTEM WATCH never auto-elevates. `AdapterTotalsSampler` —
+  system-wide down/up bps from per-interface counters (loopback excluded),
+  labeled separately from captured telemetry.
+- `synthetic.py` — `SyntheticActivityProvider`: TEST-ONLY logical-TIER2
+  source, activated exclusively via `ESW_TELEMETRY_PROVIDER=synthetic`.
+  Scans the real socket table at 2 Hz (never hammering psutil, which would
+  corrupt the collector's own attribution), caches matching ESTABLISHED
+  loopback tuples for a target port, and emits fabricated metadata events
+  (~100 Hz) for those REAL tuples. Capability is labeled `SYNTHETIC TEST
+  PROVIDER (logical)` so it can never be mistaken for real ETW. Used by the
+  acceptance suite (Tests S/T) and manual verification only.
+- `activity_aggregator.py` — 200 ms aggregation windows; raw events are
+  ingested in batches (`record_many` — one lock acquisition per window) and
+  mapped to topology edges via (pid, 4-tuple) evidence rebuilt each tick;
+  per-edge directional rates (1 s EMA) and activity levels; ACTIVE
+  (< 500 ms) / RECENT (< 5 s) / IDLE decay timestamps; per-process totals
+  for the node inspector/halo; conservative TRAFFIC_BURST detection. Events
+  that cannot be mapped to a specific edge are attributed to the owning
+  process (node halo) or dropped — never faked onto a random edge.
+  Diagnostic counters track every stage: events recorded / mapped to edges
+  / mapped to nodes / unattributed / batches emitted, plus the last
+  non-empty batch's directional byte totals.
 
 **Fallback chain** (documented + tested): ETW TIER2 → TIER0. If the ETW
 session dies at runtime, a `TELEMETRY_CAPABILITY_CHANGED` event is emitted
@@ -152,9 +195,17 @@ explicit direction. Documented, not used.
 - `GET /api/health` — loop health, error counters, last-tick age.
 - `GET /api/state` — current full topology (debugging).
 - `GET /api/telemetry` — current capability tier + reason (honest indicator).
+- `GET /api/telemetry/debug` — read-only pipeline counters: provider
+  received/drained/dropped + queue depth, aggregator recorded/mapped/
+  unattributed/batches, last batch's directional bytes. Counts only, never
+  payloads; localhost-only like everything else.
 - `WS /ws` — on connect: full snapshot (once). Then: event batches (≤100),
   `network_activity` batches (≤ ~5/s), stats every 2 s (with `net` block +
   telemetry info), heartbeat ping. No periodic full re-transmission.
+- The telemetry runtime loop (`_telemetry_loop`) calls `_telemetry_tick()`
+  every ~200 ms: `provider.drain() → aggregator.record_many() →
+  aggregator.flush()`. Provider and health-probe failures are caught — a
+  broken telemetry source never kills SYSTEM WATCH (tested).
 - `EventStream` is an async pub/sub bus; slow clients drop oldest events
   instead of blocking the collector.
 - The collector loop runs `collect → build topology → diff → publish` every
@@ -174,16 +225,28 @@ explicit direction. Documented, not used.
 - `graph/GraphController.ts` — one Cytoscape instance for the app lifetime;
   `cy.batch` upserts; snapshot → full replace + fcose layout; events →
   incremental add/update/fade-remove. Per-edge activity state feeds edge
-  styling (`actLow/actMed/actHigh`) and the pulse overlay. Port lists on
-  shared edges are **merged** on every open event (never replaced), so
-  multi-connection edges stay stable regardless of event order.
+  styling (`actLow/actMed/actHigh`) and the pulse overlay. A single shared
+  activity-decay scheduler (1 s interval, started on first activity batch,
+  stopped when nothing is tracked — never one timer per edge) clears stale
+  edge styling and per-node net rates purely by wall-clock age, so visual
+  state decays even when no further `network_activity` batch arrives.
+  Port lists on shared edges are **merged** on every open event (never
+  replaced), so multi-connection edges stay stable regardless of event
+  order.
 - `graph/EdgePulseOverlay.ts` — a transparent canvas above the graph draws
-  traveling particles only for edges with real activity; the rAF loop stops
-  when idle. Two strictly separate signal classes:
+  traveling particles only for edges with real activity. Two strictly
+  separate signal classes:
   1. lifecycle pulses (`open`/`close`/`update` — socket events);
   2. directional **data** particles from real observed bytes (forward =
      source→target, reverse = target→source; spawn rate scales with the
-     observed rate; stops ~500 ms after the last activity).
+     observed rate).
+  Decay is time-based inside the rAF loop itself: the activity map is
+  pruned by age (RECENT > 5 s ⇒ removed), so a traffic stop with no
+  further backend batch still fully idles — no particles, no glow, no
+  thick edge — and when activity/particles/pulses/recents are all empty
+  the loop cancels its own rAF and stops entirely. (Test-only `testMute`/
+  `testForceIdle` hooks let the acceptance suite verify the stop mechanism
+  deterministically on a busy machine; they touch UI state only.)
 - Semantic zoom: far = wireframe (translucent fills, bright borders) with no
   labels; medium = process names; close = name + PID + CPU + RAM.
 - FAMILY view (NODES/FAMILIES toggle): real parent/child process trees

@@ -56,6 +56,15 @@ class ActivityAggregator:
         self._capability = Capability()
         self._seq = 0
         self._last_flush = time.time()
+        # read-only diagnostics (exposed via /api/telemetry/debug)
+        self._counters = {
+            "events_recorded": 0,
+            "events_mapped_to_edges": 0,
+            "events_mapped_to_nodes": 0,
+            "events_unattributed": 0,
+            "activity_batches_emitted": 0,
+        }
+        self._last_batch: dict = {}
 
     # ------------------------------------------------------------ topology
 
@@ -109,6 +118,20 @@ class ActivityAggregator:
     def record(self, ev: NetworkActivityEvent) -> None:
         with self._lock:
             self._pending.append(ev)
+            self._counters["events_recorded"] += 1
+
+    def record_many(self, events: list[NetworkActivityEvent]) -> None:
+        """Batch-ingest drained provider events with ONE lock acquisition.
+
+        The ETW provider can deliver thousands of events per window; feeding
+        them through ``record()`` one by one would acquire the lock per
+        event. The runtime loop drains the provider and calls this once.
+        """
+        if not events:
+            return
+        with self._lock:
+            self._pending.extend(events)
+            self._counters["events_recorded"] += len(events)
 
     # -------------------------------------------------------------- output
 
@@ -129,10 +152,14 @@ class ActivityAggregator:
 
         edge_bytes: dict[str, list[int]] = {}   # edge_id -> [fwd, rev]
         proc_bytes: dict[str, list[int]] = {}   # sid -> [down, up]
+        mapped_edges = 0
+        mapped_nodes = 0
+        unattributed = 0
         for ev in pending:
             key = (ev.pid, ev.local_ip, ev.local_port, ev.remote_ip, ev.remote_port)
             hit = tuple_map.get(key)
             if hit is not None:
+                mapped_edges += 1
                 eid, owner_is_src, _kind = hit
                 if ev.direction == "OUT":
                     fwd = ev.size if owner_is_src else 0
@@ -144,6 +171,7 @@ class ActivityAggregator:
                 bucket[0] += fwd
                 bucket[1] += rev
             elif ev.pid is not None and ev.pid in pid_map:
+                mapped_nodes += 1
                 # real activity that cannot be pinned to a specific edge
                 # (e.g. tuple changed between ticks): attribute to the process
                 bucket = proc_bytes.setdefault(pid_map[ev.pid], [0, 0])
@@ -151,7 +179,8 @@ class ActivityAggregator:
                     bucket[1] += ev.size
                 else:
                     bucket[0] += ev.size
-            # else: unattributed -> counted only by adapter totals
+            else:
+                unattributed += 1  # counted only by adapter totals
 
         items: list[dict] = []
         burst_events: list[Event] = []
@@ -222,6 +251,21 @@ class ActivityAggregator:
             })
 
         self._prune(now)
+
+        # diagnostics: truthful counters + last non-empty batch totals
+        if items or node_items:
+            self._last_batch = {
+                "ts": now,
+                "fwd_bytes": sum(i["fwd_bytes"] for i in items),
+                "rev_bytes": sum(i["rev_bytes"] for i in items),
+                "node_down_bytes": sum(n["down_bps"] * window_s for n in node_items),
+                "node_up_bytes": sum(n["up_bps"] * window_s for n in node_items),
+            }
+            with self._lock:
+                self._counters["activity_batches_emitted"] += 1
+                self._counters["events_mapped_to_edges"] += mapped_edges
+                self._counters["events_mapped_to_nodes"] += mapped_nodes
+                self._counters["events_unattributed"] += unattributed
         return items, burst_events, node_items
 
     def _prune(self, now: float) -> None:
@@ -250,6 +294,15 @@ class ActivityAggregator:
     def process_state(self, sid: str) -> Optional[ProcessRateState]:
         with self._lock:
             return self._procs.get(sid)
+
+    def process_states(self) -> dict[str, ProcessRateState]:
+        with self._lock:
+            return dict(self._procs)
+
+    def counters(self) -> dict:
+        """Read-only diagnostic counters (safe for /api/telemetry/debug)."""
+        with self._lock:
+            return {**self._counters, "last_batch": dict(self._last_batch)}
 
     def totals(self) -> dict:
         """Machine-level totals of captured telemetry (source: 'CAPTURED').

@@ -31,7 +31,7 @@ Status legend:
 | **16** | MCP Server Detection — MCP server process/socket mapping | **NOT STARTED** |
 | **17** | AI Agent Telemetry — agent nodes, tool calls, agent-to-agent messages, tokens/TPS/latency | **NOT STARTED** (schema designed; see ARCHITECTURE.md) |
 | **18** | GPU / VRAM Telemetry — nvidia-smi / NVML collectors | **NOT STARTED** |
-| **19** | Advanced Network Activity — per-connection byte/rate telemetry with honest capability tiers | **FUNCTIONAL** (full ETW TIER2 pipeline implemented + tested with mocks; on this machine ETW requires elevation — backend unelevated truthfully reports TIER0 + adapter totals; verified: harness traffic, edge lifecycle, bursts, decay) |
+| **19** | Advanced Network Activity — per-connection byte/rate telemetry with honest capability tiers | **FUNCTIONAL** (provider→aggregator wiring fixed in 0.2.1: ETW callback → bounded queue → `drain()` → `record_many()` → 200 ms aggregator → WS batches; logical TIER2 validated end-to-end on this machine using the opt-in `ESW_TELEMETRY_PROVIDER=synthetic` test provider — real tuples, real pipeline, clearly labeled SYNTHETIC; acceptance Tests S/T green. Real Microsoft-Windows-TCPIP ETW Tier2 still requires an Administrator session and is PENDING elevated validation; backend unelevated truthfully reports TIER0 + adapter totals) |
 | **20** | Large Graph Optimization — 1000+ node validation, clustering, virtualization | **IN PROGRESS** (idle rAF stops, activity batches ≤5 msg/s, bounded queues/particles; focus mode + family view reduce visual clutter; full 1000+ validation still pending) |
 
 ---

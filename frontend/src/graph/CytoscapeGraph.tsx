@@ -57,6 +57,7 @@ export function CytoscapeGraph({ controllerRef, filter, search, onSelect, onSele
     controllerRef.current = controller
     // exposed for acceptance testing / debugging
     ;(window as unknown as Record<string, unknown>).__esw_cy = cy
+    ;(window as unknown as Record<string, unknown>).__esw_controller = controller
 
     cy.on('tap', 'node', (ev) => {
       const shift = !!(ev.originalEvent as MouseEvent | undefined)?.shiftKey

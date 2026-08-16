@@ -97,6 +97,14 @@ class NetworkActivityProvider:
         """True while the provider is expected to keep delivering events."""
         return True
 
+    def queue_depth(self) -> int:
+        """Current buffered-event count (diagnostics)."""
+        return 0
+
+    def counters(self) -> dict:
+        """Read-only diagnostic counters (diagnostics)."""
+        return {}
+
 
 @dataclass
 class EdgeRateState:

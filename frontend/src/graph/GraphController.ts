@@ -17,7 +17,7 @@ import type {
   TopoNode,
   ViewMode,
 } from '../types/system'
-import { EdgePulseOverlay } from './EdgePulseOverlay'
+import { EdgePulseOverlay, RECENT_MS } from './EdgePulseOverlay'
 
 cytoscape.use(fcose)
 
@@ -182,6 +182,7 @@ export class GraphController {
   private search = ''
   private tooltip: HTMLDivElement | null = null
   private edgeActivity = new Map<string, EdgeActivityState>()
+  private activityDecayTimer: number | undefined
   private telemetrySource = 'SOCKET EVENTS'
   private familyView: ViewMode = 'nodes'
   private focusNode: string | null = null
@@ -237,9 +238,25 @@ export class GraphController {
         level: it.level,
       })
     }
+    // prune edges that stopped reporting and are no longer recent — MUST
+    // also strip the cytoscape act* styling, or stale edges stay lit
+    // forever with no entry left to decay (v0.2.1 decay bug)
+    const pruned: string[] = []
     for (const [eid, st] of this.edgeActivity) {
-      if (!touched.has(eid) && now - st.lastActivity > 5500) this.edgeActivity.delete(eid)
+      if (!touched.has(eid) && now - st.lastActivity > 5500) {
+        this.edgeActivity.delete(eid)
+        pruned.push(eid)
+      }
     }
+    if (pruned.length > 0) {
+      this.cy.batch(() => {
+        for (const eid of pruned) {
+          const el = this.cy.getElementById(eid)
+          if (el.length) el.removeData('actLow actMed actHigh')
+        }
+      })
+    }
+    this.ensureActivityDecayTimer()
     this.cy.batch(() => {
       for (const it of items) {
         const el = this.cy.getElementById(it.edge_id)
@@ -271,6 +288,83 @@ export class GraphController {
       }
     })
     this.overlay.applyActivity(items)
+  }
+
+  // --------------------------------------------------- activity decay (v0.2.1)
+
+  /**
+   * One shared activity-decay scheduler (never a per-edge timer): a single
+   * 1 s interval, started when the first activity batch arrives and stopped
+   * as soon as the edge-activity map is empty. While it runs it clears
+   * stale `actLow/actMed/actHigh` styling (and stale per-process net rates)
+   * purely by wall-clock age — so visual state decays even when the backend
+   * sends no further network_activity batch. This is UI decay, never a fake
+   * zero-rate network observation.
+   */
+  private ensureActivityDecayTimer(): void {
+    if (this.activityDecayTimer !== undefined) return
+    this.activityDecayTimer = window.setInterval(() => this.decayEdgeActivity(), 1000)
+  }
+
+  private decayEdgeActivity(): void {
+    const now = performance.now()
+    const stale: string[] = []
+    for (const [eid, st] of this.edgeActivity) {
+      if (now - st.lastActivity > RECENT_MS) stale.push(eid)
+    }
+    if (stale.length > 0) {
+      this.cy.batch(() => {
+        for (const eid of stale) {
+          this.edgeActivity.delete(eid)
+          const el = this.cy.getElementById(eid)
+          if (el.length) el.removeData('actLow actMed actHigh net_out_bps net_in_bps last_activity')
+        }
+      })
+    }
+    // node-halo rates decay independently of edge staleness
+    this.clearStaleNodeRates()
+    const nodesWithRates = this.cy.nodes('[?last_activity]').length
+    if (this.edgeActivity.size === 0 && nodesWithRates === 0 && this.activityDecayTimer !== undefined) {
+      clearInterval(this.activityDecayTimer)
+      this.activityDecayTimer = undefined
+    }
+  }
+
+  /** Process nodes keep their ↓/↑ rates only while telemetry is fresh. */
+  private clearStaleNodeRates(): void {
+    const epochNow = Date.now() / 1000
+    const els = this.cy.nodes('[?last_activity]')
+    if (els.length === 0) return
+    const stale: NodeSingular[] = []
+    els.forEach((n) => {
+      const la = n.data('last_activity') as number | undefined
+      if (typeof la === 'number' && epochNow - la > RECENT_MS / 1000) stale.push(n as NodeSingular)
+    })
+    if (stale.length === 0) return
+    this.cy.batch(() => {
+      for (const n of stale) n.removeData('net_out_bps net_in_bps last_activity')
+    })
+  }
+
+  /** Read-only diagnostics for acceptance tests / debugging. */
+  overlayStats() {
+    return this.overlay.stats()
+  }
+
+  /** TEST ONLY (acceptance Test T3): force the overlay's terminal idle
+   * state to verify the rAF stop mechanism deterministically. */
+  testForceIdle(): void {
+    this.overlay.testForceIdle()
+  }
+
+  /** TEST ONLY (acceptance Test T3): mute the lifecycle pulse feed while
+   * verifying the rAF stop mechanism (see EdgePulseOverlay.testMute). */
+  testMute(muted: boolean): void {
+    this.overlay.testMute(muted)
+  }
+
+  debugStats(): { edgeActivity: number; telemetrySource: string } {
+    return { edgeActivity: this.edgeActivity.size, telemetrySource: this.telemetrySource }
   }
 
   // ---------------------------------------------------------------- snapshot
@@ -1027,6 +1121,10 @@ export class GraphController {
   }
 
   destroy(): void {
+    if (this.activityDecayTimer !== undefined) {
+      clearInterval(this.activityDecayTimer)
+      this.activityDecayTimer = undefined
+    }
     this.selBoxCleanup?.()
     this.overlay.destroy()
   }
