@@ -1,3 +1,5 @@
+import { fmtBps } from '../graph/GraphController'
+
 interface Props {
   node: Record<string, unknown>
   onClose: () => void
@@ -6,6 +8,14 @@ interface Props {
 function fmtTime(epoch: unknown): string {
   if (typeof epoch !== 'number' || !epoch) return '—'
   return new Date(epoch * 1000).toLocaleTimeString('en-GB', { hour12: false })
+}
+
+function ageLabel(lastActivity: unknown): string {
+  if (typeof lastActivity !== 'number' || !lastActivity) return '—'
+  const ms = Date.now() / 1000 - lastActivity
+  if (ms < 0.5) return 'now'
+  if (ms < 60) return `${Math.round(ms * 1000)} ms ago`
+  return `${Math.round(ms)} s ago`
 }
 
 /** Read-only node inspector. Observation only — no control buttons, by design. */
@@ -59,6 +69,11 @@ export function Inspector({ node, onClose }: Props) {
     )
   }
 
+  const hasNet =
+    typeof node.net_in_bps === 'number' ||
+    typeof node.net_out_bps === 'number' ||
+    typeof node.last_activity === 'number'
+
   return (
     <aside className="inspector">
       <div className="inspector-head">
@@ -69,6 +84,24 @@ export function Inspector({ node, onClose }: Props) {
         <div className="inspector-label">{String(node.label ?? node.id ?? '')}</div>
         <div className="inspector-kind">{kind}</div>
       </div>
+      {/* NETWORK section — only rendered when actual telemetry exists */}
+      {hasNet && kind === 'PROCESS' && (
+        <div className="inspector-net">
+          <div className="inspector-net-title">NETWORK</div>
+          <div className="inspector-net-row">
+            <span className="net-arrow-down">↓ {typeof node.net_in_bps === 'number' ? fmtBps(node.net_in_bps) : '—'}</span>
+          </div>
+          <div className="inspector-net-row">
+            <span className="net-arrow-up">↑ {typeof node.net_out_bps === 'number' ? fmtBps(node.net_out_bps) : '—'}</span>
+          </div>
+          <div className="inspector-net-row">
+            Connections: {String(node.conn_count ?? '—')}
+          </div>
+          <div className="inspector-net-row">
+            Last activity: {ageLabel(node.last_activity)}
+          </div>
+        </div>
+      )}
       <dl className="inspector-rows">
         {rows.map(([k, v]) => (
           <div className="inspector-row" key={k}>

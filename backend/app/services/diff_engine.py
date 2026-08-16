@@ -98,10 +98,30 @@ class DiffEngine:
                 return c.remote_port
             return c.local_port
 
+        def _owner_really_gone(ckey: str, c, owner: Optional[str]) -> bool:
+            """True only when the owner stopped AND its socket tuples are gone.
+
+            psutil can transiently miss a process that is mid-startup (or a
+            socket's owning PID can flip from None to the real PID as the
+            process finishes initializing). In those windows the connection
+            tuple still exists in the current snapshot with a different key
+            form — suppressing events then would silently drop real
+            CONNECTION_OPENED/CLOSED announcements (the edge would never
+            appear on clients). Suppress only when the tuples are truly gone.
+            """
+            if owner not in stopped:
+                return False
+            for k2, c2 in cur_c.items():
+                if (c2.local_ip, c2.local_port, c2.remote_ip, c2.remote_port) == (
+                    c.local_ip, c.local_port, c.remote_ip, c.remote_port
+                ):
+                    return False
+            return True
+
         for ckey in sorted(set(cur_c) - set(prev_c)):
             c = cur_c[ckey]
             owner = snap.owner_map.get(ckey)
-            if owner in stopped:
+            if _owner_really_gone(ckey, c, owner):
                 continue
             tgt, kind, eid = topo.conn_targets.get(ckey, (SYSTEM_NODE_ID, "EXTERNAL", "e:unknown"))
             events.append(Event(
@@ -129,7 +149,7 @@ class DiffEngine:
         for ckey in sorted(set(prev_c) - set(cur_c)):
             c = prev_c[ckey]
             owner = prev_snap.owner_map.get(ckey)
-            if owner in stopped:
+            if _owner_really_gone(ckey, c, owner):
                 continue
             tgt, kind, eid = prev_topo.conn_targets.get(ckey, (SYSTEM_NODE_ID, "EXTERNAL", "e:unknown"))
             remaining = 0

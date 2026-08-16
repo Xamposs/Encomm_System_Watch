@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { EventType, SystemEvent } from '../types/system'
+import { fmtBps } from '../graph/GraphController'
 
 interface Props {
   open: boolean
@@ -13,6 +14,8 @@ const TYPE_LABEL: Record<EventType, string> = {
   CONNECTION_OPENED: 'CONNECTION OPENED',
   CONNECTION_CLOSED: 'CONNECTION CLOSED',
   PROCESS_METRICS_UPDATED: 'METRICS',
+  TRAFFIC_BURST: 'TRAFFIC BURST',
+  TELEMETRY_CAPABILITY_CHANGED: 'TELEMETRY',
 }
 
 const TYPE_CLASS: Record<EventType, string> = {
@@ -21,6 +24,8 @@ const TYPE_CLASS: Record<EventType, string> = {
   CONNECTION_OPENED: 'ev-open',
   CONNECTION_CLOSED: 'ev-close',
   PROCESS_METRICS_UPDATED: 'ev-metrics',
+  TRAFFIC_BURST: 'ev-burst',
+  TELEMETRY_CAPABILITY_CHANGED: 'ev-telemetry',
 }
 
 function describe(ev: SystemEvent): string {
@@ -34,6 +39,10 @@ function describe(ev: SystemEvent): string {
       return `${m.src_label ?? '?'} → ${m.tgt_label ?? '?'} ${m.proto ?? ''}:${m.edge_port ?? '?'}`
     case 'PROCESS_METRICS_UPDATED':
       return `${m.name ?? '?'} CPU ${Number(m.cpu_percent ?? 0).toFixed(1)}% · ${Math.round(Number(m.memory_mb ?? 0))}MB`
+    case 'TRAFFIC_BURST':
+      return `${m.src_label ?? '?'} → ${m.tgt_label ?? '?'} ${fmtBps(Number(m.rate_bps ?? 0))} (${Math.round(Number(m.bytes ?? 0) / 1024)} KB in ${m.window_ms ?? '?'} ms)`
+    case 'TELEMETRY_CAPABILITY_CHANGED':
+      return `${m.level ?? '?'} · ${m.source ?? '?'}${m.elevation_required ? ' · ELEVATION REQUIRED' : ''}`
   }
 }
 

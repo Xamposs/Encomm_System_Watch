@@ -27,6 +27,11 @@ class Settings:
     metrics_force_interval_s: float = 10.0
     ws_heartbeat_s: float = 15.0
     max_event_batch: int = 100
+    # ---- network telemetry -------------------------------------------------
+    telemetry_enabled: bool = True
+    telemetry_flush_ms: float = 200.0      # activity aggregation window
+    telemetry_burst_bytes: int = 200_000   # per-edge per-window burst threshold
+    telemetry_burst_cooldown_s: float = 10.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -38,4 +43,8 @@ class Settings:
             max_external_nodes=int(os.environ.get("ESW_MAX_EXTERNAL_NODES", "120")),
             max_listen_nodes=int(os.environ.get("ESW_MAX_LISTEN_NODES", "40")),
             max_loc_nodes=int(os.environ.get("ESW_MAX_LOC_NODES", "40")),
+            telemetry_enabled=_env_bool("ESW_TELEMETRY_ENABLED", True),
+            telemetry_flush_ms=float(os.environ.get("ESW_TELEMETRY_FLUSH_MS", "200")),
+            telemetry_burst_bytes=int(os.environ.get("ESW_TELEMETRY_BURST_BYTES", "200000")),
+            telemetry_burst_cooldown_s=float(os.environ.get("ESW_TELEMETRY_BURST_COOLDOWN_S", "10")),
         )

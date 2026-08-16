@@ -237,9 +237,34 @@ body,
   inset: 0;
 }
 
+/* near-black technical canvas: faint micro-grid + soft vignette, no bright
+   gradients — the graph itself is the dominant visual component */
 .graph-canvas {
   position: absolute;
   inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 45%, rgba(24, 40, 60, 0.4), transparent 70%),
+    repeating-linear-gradient(0deg, rgba(53, 224, 255, 0.03) 0 1px, transparent 1px 44px),
+    repeating-linear-gradient(90deg, rgba(53, 224, 255, 0.03) 0 1px, transparent 1px 44px),
+    #04070b;
+}
+
+.graph-canvas::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(120, 160, 200, 0.05) 1px, transparent 1px);
+  background-size: 7px 7px;
+}
+
+/* rubber-band multi-select box (shift+drag) */
+.sel-box {
+  position: absolute;
+  z-index: 15;
+  border: 1px dashed rgba(53, 224, 255, 0.9);
+  background: rgba(53, 224, 255, 0.08);
+  pointer-events: none;
 }
 
 .edge-tooltip {
@@ -247,14 +272,178 @@ body,
   z-index: 30;
   display: none;
   pointer-events: none;
-  background: #0a1219;
-  border: 1px solid #22374a;
+  background: rgba(8, 14, 20, 0.97);
+  border: 1px solid #2b4257;
   color: var(--text);
   font-family: var(--mono);
   font-size: 10px;
-  padding: 3px 7px;
+  padding: 6px 9px;
+  white-space: nowrap;
+  box-shadow: 0 0 16px rgba(0, 0, 0, 0.6);
+}
+
+.edge-tooltip div + div {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px solid rgba(34, 55, 74, 0.6);
+}
+
+/* selection summary bar (multi-select) */
+.selection-bar {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(10, 18, 26, 0.97);
+  border: 1px solid rgba(53, 224, 255, 0.45);
+  padding: 6px 14px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  box-shadow: 0 0 18px rgba(0, 0, 0, 0.55);
+}
+
+.selection-hint {
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+/* telemetry capability chip (honesty indicator) */
+.tel-chip {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 1.5px;
+  padding: 3px 8px;
+  border: 1px solid var(--panel-edge);
   white-space: nowrap;
 }
+
+.tel-chip.tel-t2 {
+  color: var(--green);
+  border-color: rgba(61, 220, 132, 0.4);
+  background: rgba(61, 220, 132, 0.06);
+}
+
+.tel-chip.tel-t0 {
+  color: var(--amber);
+  border-color: rgba(240, 166, 60, 0.35);
+  background: rgba(240, 166, 60, 0.05);
+}
+
+.tel-chip.tel-off {
+  color: var(--text-dim);
+}
+
+.tel-elev {
+  color: var(--amber);
+}
+
+/* header network block */
+.stat-block.net {
+  border-left: 1px solid var(--panel-edge);
+  padding-left: 20px;
+  min-width: 150px;
+}
+
+.net-source {
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+/* view mode toggle + focus chip */
+.view-toggle {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--panel-edge);
+}
+
+.view-toggle .pill {
+  border: none;
+  border-right: 1px solid var(--panel-edge);
+}
+
+.view-toggle .pill:last-child {
+  border-right: none;
+}
+
+.focus-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(53, 224, 255, 0.4);
+  background: rgba(53, 224, 255, 0.05);
+  padding: 3px 6px;
+}
+
+.focus-chip .pill {
+  border: 1px solid var(--panel-edge);
+  padding: 2px 8px;
+  font-size: 8.5px;
+}
+
+.focus-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: var(--accent);
+  margin-right: 2px;
+}
+
+.sel-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  border: 1px solid rgba(53, 224, 255, 0.4);
+  padding: 2px 8px;
+  background: rgba(53, 224, 255, 0.05);
+}
+
+/* inspector NETWORK section */
+.inspector-net {
+  margin: 0 14px;
+  padding: 8px 12px;
+  border: 1px solid rgba(53, 224, 255, 0.25);
+  background: rgba(53, 224, 255, 0.04);
+  font-family: var(--mono);
+}
+
+.inspector-net-title {
+  font-size: 8.5px;
+  letter-spacing: 2.5px;
+  color: var(--accent);
+  margin-bottom: 5px;
+}
+
+.inspector-net-row {
+  font-size: 10.5px;
+  color: var(--text);
+  padding: 1px 0;
+}
+
+.net-arrow-down { color: var(--green); }
+.net-arrow-up { color: var(--amber); }
+
+/* legend additions */
+.lg-fwd { color: var(--accent); }
+.lg-rev { color: #ffb35c; }
+.legend-hint {
+  color: #46596b;
+  letter-spacing: 0.5px;
+  font-size: 8px;
+}
+
+/* drawer: new event kinds */
+.ev-burst .ev-type { color: var(--amber); font-weight: 700; }
+.ev-telemetry .ev-type { color: var(--green); }
 
 .boot-overlay {
   position: absolute;

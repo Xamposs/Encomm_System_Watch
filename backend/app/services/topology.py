@@ -91,6 +91,7 @@ class TopologyEngine:
         )
 
         # ---- PROCESS nodes ---------------------------------------------------
+        pid_to_sid = {p.pid: sid for sid, p in snap.processes.items() if p.pid is not None}
         for sid, p in snap.processes.items():
             nodes[sid] = TNode(
                 id=sid,
@@ -106,6 +107,7 @@ class TopologyEngine:
                     "memory_mb": p.memory_mb,
                     "num_threads": p.num_threads,
                     "ppid": p.ppid,
+                    "parent_sid": pid_to_sid.get(p.ppid) if p.ppid is not None else None,
                     "created": p.create_time,
                     "cmdline": p.cmdline,
                     "conn_count": 0,

@@ -6,19 +6,34 @@ import { FilterBar } from './components/FilterBar'
 import { Inspector } from './components/Inspector'
 import { EventDrawer } from './components/EventDrawer'
 import { Legend } from './components/Legend'
-import type { Filter } from './types/system'
+import type { Filter, ViewMode } from './types/system'
 
 export default function App() {
   const {
     status, mode, ready, stats, feedTs, events,
-    selected, selectNode, drawerOpen, setDrawerOpen, controllerRef,
+    selected, selectNode, drawerOpen, setDrawerOpen, telemetry, controllerRef,
   } = useSystemWatch()
   const [filter, setFilter] = useState<Filter>('all')
   const [search, setSearch] = useState('')
+  const [viewMode, setViewMode] = useState<ViewMode>('nodes')
+  const [focusNode, setFocusNode] = useState<string | null>(null)
+  const [focusHops, setFocusHops] = useState(1)
+  const [selectionCount, setSelectionCount] = useState(0)
+
+  const applyFocus = (id: string | null, hops = focusHops) => {
+    setFocusNode(id)
+    controllerRef.current?.setFocus(id, hops)
+  }
 
   return (
     <div className="app">
-      <Header status={status} mode={mode} stats={stats} feedTs={feedTs} />
+      <Header
+        status={status}
+        mode={mode}
+        stats={stats}
+        feedTs={feedTs}
+        telemetry={telemetry}
+      />
 
       <FilterBar
         filter={filter}
@@ -28,6 +43,24 @@ export default function App() {
         onFit={() => controllerRef.current?.fit()}
         onZoomIn={() => controllerRef.current?.zoomIn()}
         onZoomOut={() => controllerRef.current?.zoomOut()}
+        viewMode={viewMode}
+        onViewMode={(m) => {
+          setViewMode(m)
+          controllerRef.current?.setViewMode(m)
+        }}
+        focusNode={focusNode}
+        focusHops={focusHops}
+        onFocusHops={(h) => {
+          setFocusHops(h)
+          if (focusNode) controllerRef.current?.setFocus(focusNode, h)
+        }}
+        onFocusExit={() => applyFocus(null)}
+        selectionCount={selectionCount}
+        onClearSelection={() => {
+          controllerRef.current?.clearSelection()
+          setSelectionCount(0)
+          selectNode(null)
+        }}
       />
 
       <main className="main">
@@ -36,6 +69,8 @@ export default function App() {
           filter={filter}
           search={search}
           onSelect={selectNode}
+          onSelectMulti={(n) => setSelectionCount(n)}
+          onFocusNode={(id) => applyFocus(id === focusNode ? null : id, 1)}
         />
         <Legend />
         {!ready && (
@@ -47,7 +82,20 @@ export default function App() {
         )}
       </main>
 
-      {selected && <Inspector node={selected} onClose={() => selectNode(null)} />}
+      {selectionCount > 1 && (
+        <div className="selection-bar">
+          <span className="selection-count">{selectionCount} NODES SELECTED</span>
+          <span className="selection-hint">INSPECTION ONLY · SHIFT+DRAG TO SELECT · SHIFT+CLICK TOGGLE</span>
+          <button className="fit-btn" onClick={() => {
+            controllerRef.current?.clearSelection()
+            setSelectionCount(0)
+          }}>CLEAR</button>
+        </div>
+      )}
+
+      {selectionCount === 1 && selected && (
+        <Inspector node={selected} onClose={() => selectNode(null)} />
+      )}
 
       <EventDrawer open={drawerOpen} onToggle={() => setDrawerOpen(!drawerOpen)} events={events} />
     </div>

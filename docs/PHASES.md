@@ -22,17 +22,17 @@ Status legend:
 | **07** | System Metrics — machine CPU/RAM header stats, per-process CPU/RAM, throttled metric events | **COMPLETE** (verified: METRICS events flowing, Test G) |
 | **08** | Windows Services — service enumeration (name, state, start type, account) as nodes | **NOT STARTED** (collector seam ready) |
 | **09** | Docker + WSL observability | **NOT STARTED** (designed-for) |
-| **10** | Advanced Node Inspector — read-only details panel, no controls | **FUNCTIONAL** (core complete; more metadata planned) |
-| **11** | Search / Filtering / Grouping — search highlight, ALL/ACTIVE/LISTENING/HIGH CPU filters | **FUNCTIONAL** (search + 4 filters; grouping not yet) |
-| **12** | Live Event Drawer — bounded chronological feed | **COMPLETE** (800-event buffer, verified Test I) |
-| **13** | Visual Polish — control-room theme, zoom-aware labels, layout tuning | **IN PROGRESS** (dark theme + pulse overlay done; fine-tuning continues) |
+| **10** | Advanced Node Inspector — read-only details panel, no controls | **COMPLETE** (added NETWORK section: ↓/↑ rates, connections, last activity — only when real telemetry exists) |
+| **11** | Search / Filtering / Grouping — search highlight, ALL/ACTIVE/LISTENING/HIGH CPU filters, family grouping | **COMPLETE** (search + 4 filters + NODES/FAMILIES toggle using real parent_sid evidence; verified Tests N, P) |
+| **12** | Live Event Drawer — bounded chronological feed | **COMPLETE** (800-event buffer, verified Test I; now also TRAFFIC BURST + TELEMETRY rows) |
+| **13** | Visual Polish — control-room theme, zoom-aware labels, layout tuning | **COMPLETE** (near-black micro-grid canvas, wireframe far-zoom mode, semantic label buckets, brightened palette, edge activity styling, focus dimming, live 1600×1000 screenshot verified visually) |
 | **14** | LM Studio Detection — local LLM API discovery (localhost sockets + HTTP probe) | **NOT STARTED** |
 | **15** | Hermes Detection — Hermes gateway/agent process identification | **NOT STARTED** |
 | **16** | MCP Server Detection — MCP server process/socket mapping | **NOT STARTED** |
 | **17** | AI Agent Telemetry — agent nodes, tool calls, agent-to-agent messages, tokens/TPS/latency | **NOT STARTED** (schema designed; see ARCHITECTURE.md) |
 | **18** | GPU / VRAM Telemetry — nvidia-smi / NVML collectors | **NOT STARTED** |
-| **19** | Advanced Network Activity — packet-level or per-connection byte/rate telemetry | **NOT STARTED** (explicitly out of scope for phase 1; see limitation notes) |
-| **20** | Large Graph Optimization — 1000+ node validation, clustering, virtualization | **NOT STARTED** (architecture already avoids per-frame React work) |
+| **19** | Advanced Network Activity — per-connection byte/rate telemetry with honest capability tiers | **FUNCTIONAL** (full ETW TIER2 pipeline implemented + tested with mocks; on this machine ETW requires elevation — backend unelevated truthfully reports TIER0 + adapter totals; verified: harness traffic, edge lifecycle, bursts, decay) |
+| **20** | Large Graph Optimization — 1000+ node validation, clustering, virtualization | **IN PROGRESS** (idle rAF stops, activity batches ≤5 msg/s, bounded queues/particles; focus mode + family view reduce visual clutter; full 1000+ validation still pending) |
 
 ---
 

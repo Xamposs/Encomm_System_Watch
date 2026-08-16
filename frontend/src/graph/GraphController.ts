@@ -2,23 +2,39 @@ import cytoscape, {
   type Core,
   type EdgeSingular,
   type ElementDefinition,
+  type NodeSingular,
   type StylesheetStyle,
   type ZoomOptions,
 } from 'cytoscape'
 import fcose from 'cytoscape-fcose'
-import type { Filter, SystemEvent, TopoEdge, TopoNode } from '../types/system'
+import type {
+  Filter,
+  NetworkActivityItem,
+  NetworkActivityNode,
+  SystemEvent,
+  TelemetryInfo,
+  TopoEdge,
+  TopoNode,
+  ViewMode,
+} from '../types/system'
 import { EdgePulseOverlay } from './EdgePulseOverlay'
 
 cytoscape.use(fcose)
+
+export function fmtBps(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)} MB/s`
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)} KB/s`
+  return `${Math.round(v)} B/s`
+}
 
 export const STYLESHEET: StylesheetStyle[] = [
   {
     selector: 'node',
     style: {
-      'background-color': '#0c1520',
-      'border-color': '#22374a',
+      'background-color': '#182c44',
+      'border-color': '#4a6a92',
       'border-width': 1,
-      color: '#9fb4c8',
+      color: '#b4cbe0',
       'font-family': 'Consolas, "Cascadia Mono", monospace',
       'font-size': 9,
       'text-valign': 'center',
@@ -35,34 +51,52 @@ export const STYLESHEET: StylesheetStyle[] = [
   },
   {
     selector: 'node[kind = "PROCESS"]',
-    style: { shape: 'round-rectangle', width: 165, height: 36, 'border-color': '#2b4257' },
+    style: { shape: 'round-rectangle', width: 150, height: 34, 'border-color': '#5f83ad', 'border-width': 1.2 },
   },
   {
     selector: 'node[kind = "SYSTEM"]',
     style: {
-      shape: 'round-rectangle', width: 200, height: 56, 'border-color': '#3d5a78',
-      'border-width': 2, 'background-color': '#0a141f', 'font-size': 10,
+      shape: 'round-rectangle', width: 190, height: 52, 'border-color': '#6f96c2',
+      'border-width': 2, 'background-color': '#1b2f47', 'font-size': 10,
     },
   },
   {
     selector: 'node[kind = "EXTERNAL_ENDPOINT"]',
     style: {
-      shape: 'ellipse', width: 100, height: 26, 'background-color': '#0e141b',
-      'border-color': '#31404e', color: '#7d93a8', 'font-size': 8.5,
+      shape: 'ellipse', width: 96, height: 24, 'background-color': '#1a2533',
+      'border-color': '#5c7590', color: '#9db6cd', 'font-size': 8.5,
     },
   },
   {
     selector: 'node[kind = "LISTENING_PORT"]',
     style: {
-      shape: 'square' as never, width: 34, height: 22, 'background-color': '#0d1a16',
-      'border-color': '#2f5d49', color: '#7fbfa4', 'font-size': 8.5,
+      shape: 'square' as never, width: 32, height: 20, 'background-color': '#143024',
+      'border-color': '#5da383', color: '#9fe0c2', 'font-size': 8.5,
     },
   },
   {
     selector: 'node[kind = "LOCAL_ENDPOINT"]',
     style: {
-      shape: 'square' as never, width: 44, height: 22, 'background-color': '#12141a',
-      'border-color': '#3a3f52', color: '#8b93a8', 'font-size': 8,
+      shape: 'square' as never, width: 42, height: 20, 'background-color': '#1b2130',
+      'border-color': '#72809f', color: '#aab4cf', 'font-size': 8,
+    },
+  },
+  // family (process tree) nodes — same visual language, distinct border
+  {
+    selector: 'node[?family]',
+    style: {
+      shape: 'round-rectangle', width: 168, height: 36, 'border-color': '#6f96c2',
+      'border-width': 1.5, 'background-color': '#19304a', color: '#c4daf0',
+      'border-style': 'dashed',
+    },
+  },
+  // far zoom: wireframe mode — translucent fills, bright borders carry the shape
+  {
+    selector: 'node.compact',
+    style: {
+      'background-opacity': 0.3,
+      'border-width': 2,
+      'border-color': '#7fa8d4',
     },
   },
   { selector: 'node[?born]', style: { 'border-color': '#35e0ff', 'border-width': 2 } },
@@ -72,30 +106,49 @@ export const STYLESHEET: StylesheetStyle[] = [
   { selector: 'node[?dimmed]', style: { opacity: 0.18 } },
   { selector: 'node[?hidden]', style: { display: 'none' } },
   { selector: 'edge[?hidden]', style: { display: 'none' } },
+  { selector: 'node.fam-hidden, edge.fam-hidden', style: { display: 'none' } },
+  // focus mode: everything outside the neighborhood fades away
+  { selector: 'node.focus-dim, edge.focus-dim', style: { opacity: 0.08 } },
+  // multi-select (inspection only)
+  {
+    selector: 'node:selected',
+    style: { 'border-color': '#35e0ff', 'border-width': 2.5, 'overlay-opacity': 0.18 },
+  },
+  {
+    selector: 'edge:selected',
+    style: { 'line-color': '#35e0ff', width: 2 },
+  },
   {
     selector: 'edge',
     style: {
-      'line-color': '#1a2836',
-      width: 1.1,
+      'line-color': '#3a5874',
+      width: 1,
       'curve-style': 'bezier',
-      opacity: 0.75,
+      opacity: 0.9,
       'target-arrow-shape': 'triangle',
-      'target-arrow-color': '#1a2836',
-      'arrow-scale': 0.55,
+      'target-arrow-color': '#3a5874',
+      'arrow-scale': 0.5,
+      // invisible overlay widens the hover hit-area (tooltip friendliness)
+      'overlay-color': '#35e0ff',
+      'overlay-opacity': 0,
+      'overlay-padding': 10,
       'transition-property': 'opacity, line-color, width',
       'transition-duration': '300ms' as unknown as number,
     },
   },
-  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#2b5f70', 'target-arrow-shape': 'none' } },
-  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#3d5a36', 'target-arrow-shape': 'none', 'line-style': 'dashed' } },
-  { selector: 'edge[?active]', style: { 'line-color': '#2e5266', 'target-arrow-color': '#2e5266' } },
-  { selector: 'edge[?recent]', style: { 'line-color': '#3d7a8f', 'target-arrow-color': '#3d7a8f' } },
+  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#468aa3', 'target-arrow-shape': 'none' } },
+  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#578a52', 'target-arrow-shape': 'none', 'line-style': 'dashed' } },
+  { selector: 'edge[?active]', style: { 'line-color': '#4a7fa0', 'target-arrow-color': '#4a7fa0' } },
+  { selector: 'edge[?recent]', style: { 'line-color': '#5599b4', 'target-arrow-color': '#5599b4' } },
+  // real observed traffic subtly brightens + thickens the edge; decays back
+  { selector: 'edge[?actLow]', style: { 'line-color': '#3d9cb8', 'target-arrow-color': '#3d9cb8', width: 1.6 } },
+  { selector: 'edge[?actMed]', style: { 'line-color': '#4dbcd8', 'target-arrow-color': '#4dbcd8', width: 2.1 } },
+  { selector: 'edge[?actHigh]', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 2.7 } },
   { selector: 'edge.pulse', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 2.2 } },
   { selector: 'edge.pulse-close', style: { 'line-color': '#ff5d5d', 'target-arrow-color': '#ff5d5d', width: 2.2 } },
   { selector: 'edge.fading', style: { opacity: 0 } },
   { selector: 'node.fading', style: { opacity: 0 } },
   { selector: 'node.no-labels', style: { label: '' } }, // hide labels at low zoom
-  { selector: 'edge:selected', style: { 'line-color': '#35e0ff', width: 2 } },
 ]
 
 function portLabel(ports: number[]): string {
@@ -103,6 +156,16 @@ function portLabel(ports: number[]): string {
   const head = uniq.slice(0, 4).join(', ')
   return uniq.length > 4 ? `${head} +${uniq.length - 4}` : head
 }
+
+interface EdgeActivityState {
+  fwdBps: number
+  revBps: number
+  lastActivity: number // performance.now()
+  level: number
+}
+
+const ZOOM_FAR = 0.45
+const ZOOM_CLOSE = 0.95
 
 /**
  * Imperative controller over a single Cytoscape instance. All graph mutations
@@ -118,6 +181,15 @@ export class GraphController {
   private filter: Filter = 'all'
   private search = ''
   private tooltip: HTMLDivElement | null = null
+  private edgeActivity = new Map<string, EdgeActivityState>()
+  private telemetrySource = 'SOCKET EVENTS'
+  private familyView: ViewMode = 'nodes'
+  private focusNode: string | null = null
+  private focusHops = 1
+  private zoomBucket: 'far' | 'mid' | 'close' = 'mid'
+  private labelDirty = true
+  private labelsVisible = true
+  private compactMode = false
 
   constructor(
     private cy: Core,
@@ -130,17 +202,75 @@ export class GraphController {
     })
     cy.on('mouseover', 'edge', (ev) => this.showTooltip(ev.target as EdgeSingular))
     cy.on('mouseout', 'edge', () => this.hideTooltip())
-    cy.on('zoom', () => this.updateLabelVisibility())
+    cy.on('zoom', () => {
+      this.updateLabelVisibility()
+      this.refreshLabels()
+      this.updateCompactMode()
+    })
   }
 
-  /** Labels only above a readable zoom threshold — fit view stays a clean map. */
-  private labelsVisible = true
+  // ------------------------------------------------------------ view modes
 
-  private updateLabelVisibility(): void {
-    const show = this.cy.zoom() >= 0.45
-    if (show === this.labelsVisible) return
-    this.labelsVisible = show
-    this.cy.batch(() => this.cy.nodes().toggleClass('no-labels', !show))
+  setViewMode(mode: ViewMode): void {
+    if (mode === this.familyView) return
+    this.familyView = mode
+    if (mode === 'families') this.syncFamilyView()
+    else this.teardownFamilyView()
+  }
+
+  setTelemetry(t: TelemetryInfo | undefined): void {
+    this.telemetrySource =
+      t?.source && t.source !== 'NONE' ? t.source : 'SOCKET EVENTS (TIER 0)'
+  }
+
+  // ------------------------------------------------------------- activity
+
+  applyActivity(items: NetworkActivityItem[], nodes: NetworkActivityNode[]): void {
+    const now = performance.now()
+    const touched = new Set<string>()
+    for (const it of items) {
+      touched.add(it.edge_id)
+      this.edgeActivity.set(it.edge_id, {
+        fwdBps: it.fwd_bps,
+        revBps: it.rev_bps,
+        lastActivity: now,
+        level: it.level,
+      })
+    }
+    for (const [eid, st] of this.edgeActivity) {
+      if (!touched.has(eid) && now - st.lastActivity > 5500) this.edgeActivity.delete(eid)
+    }
+    this.cy.batch(() => {
+      for (const it of items) {
+        const el = this.cy.getElementById(it.edge_id)
+        if (el.length === 0) continue
+        el.removeData('actLow actMed actHigh')
+        if (it.level === 1) el.data('actLow', true)
+        else if (it.level === 2) el.data('actMed', true)
+        else if (it.level >= 3) el.data('actHigh', true)
+        // keep the process cards' NETWORK section fresh (throttled by batch rate)
+        const src = el.source()
+        const tgt = el.target()
+        if (src.data('kind') === 'PROCESS') {
+          src.data('net_out_bps', it.fwd_bps)
+          src.data('net_in_bps', it.rev_bps)
+          src.data('last_activity', it.last_activity)
+        }
+        if (tgt.data('kind') === 'PROCESS') {
+          tgt.data('net_out_bps', it.rev_bps)
+          tgt.data('net_in_bps', it.fwd_bps)
+          tgt.data('last_activity', it.last_activity)
+        }
+      }
+      for (const n of nodes) {
+        const el = this.cy.getElementById(n.sid)
+        if (el.length === 0) continue
+        el.data('net_out_bps', n.up_bps)
+        el.data('net_in_bps', n.down_bps)
+        el.data('last_activity', n.last_activity)
+      }
+    })
+    this.overlay.applyActivity(items)
   }
 
   // ---------------------------------------------------------------- snapshot
@@ -160,7 +290,10 @@ export class GraphController {
       this.cy.add(defs)
     })
     this.pendingNewNodes = 0
+    this.refreshLabels()
     this.runLayout('initial')
+    if (this.familyView === 'families') this.syncFamilyView()
+    if (this.focusNode) this.applyFocus()
   }
 
   private flattenNode(n: TopoNode): Record<string, unknown> {
@@ -174,7 +307,7 @@ export class GraphController {
     switch (ev.event_type) {
       case 'PROCESS_STARTED': {
         const node = ev.metadata?.node as TopoNode | undefined
-        if (node) this.upsertNode(node, true)
+        if (node) this.upsertNode(node, true, undefined)
         break
       }
       case 'PROCESS_STOPPED':
@@ -182,8 +315,10 @@ export class GraphController {
         break
       case 'CONNECTION_OPENED': {
         const m = ev.metadata
-        if (m?.src_node) this.upsertNode(m.src_node as TopoNode, false)
-        if (m?.tgt_node) this.upsertNode(m.tgt_node as TopoNode, false)
+        const srcNode = m?.src_node as TopoNode | undefined
+        const tgtNode = m?.tgt_node as TopoNode | undefined
+        if (srcNode) this.upsertNode(srcNode, false, tgtNode?.id)
+        if (tgtNode) this.upsertNode(tgtNode, false, srcNode?.id)
         this.upsertEdge({
           id: m.edge_id,
           source: m.src_node.id,
@@ -218,18 +353,18 @@ export class GraphController {
             el.data('num_threads', m.num_threads)
             el.data('status', m.status)
             el.data('highCpu', (m.cpu_percent ?? 0) >= 25 ? true : undefined)
-            el.data(
-              'label',
-              `${el.data('name')}\nPID ${el.data('pid')} · CPU ${Number(m.cpu_percent).toFixed(1)}% · ${Math.round(Number(m.memory_mb))}MB`,
-            )
           })
+          this.labelDirty = true
+          this.refreshLabels()
         }
         break
       }
     }
+    if (this.familyView === 'families') this.syncFamilyView()
+    if (this.focusNode) this.applyFocus()
   }
 
-  private upsertNode(node: TopoNode, born: boolean): void {
+  private upsertNode(node: TopoNode, born: boolean, anchorId: string | undefined): void {
     const existing = this.cy.getElementById(node.id)
     if (existing.length) {
       this.pendingNodeRemoves.delete(node.id)
@@ -237,16 +372,28 @@ export class GraphController {
       this.cy.batch(() => {
         existing.data(this.flattenNode(node))
       })
+      this.labelDirty = true
+      this.refreshLabels()
       return
     }
     const data = this.flattenNode(node)
     if (born) data.born = true
-    // place new nodes near the current view center (not model origin) so they
-    // join the visible graph; the incremental fcose pass refines positions
-    const ext = this.cy.extent()
-    const position = {
-      x: (ext.x1 + ext.x2) / 2 + (Math.random() - 0.5) * 160,
-      y: (ext.y1 + ext.y2) / 2 + (Math.random() - 0.5) * 160,
+    // place new nodes near a real neighbor when known (topology coherence),
+    // otherwise near the current view center so they join the visible graph
+    let position: { x: number; y: number }
+    const anchor = anchorId ? this.cy.getElementById(anchorId) : undefined
+    if (anchor && anchor.length) {
+      const ap = anchor.position()
+      position = {
+        x: ap.x + (Math.random() - 0.5) * 180,
+        y: ap.y + (Math.random() - 0.5) * 180,
+      }
+    } else {
+      const ext = this.cy.extent()
+      position = {
+        x: (ext.x1 + ext.x2) / 2 + (Math.random() - 0.5) * 160,
+        y: (ext.y1 + ext.y2) / 2 + (Math.random() - 0.5) * 160,
+      }
     }
     this.cy.add({ group: 'nodes', data, position })
     if (born) {
@@ -254,6 +401,15 @@ export class GraphController {
         const el = this.cy.getElementById(node.id)
         if (el.length) el.removeData('born')
       }, 800)
+    }
+    if (this.familyView === 'families') {
+      // a new member of an existing family must not render separately
+      const members = this.familyMembersOf(node.id)
+      if (members) {
+        const el = this.cy.getElementById(node.id)
+        if (el.length) el.addClass('fam-hidden')
+        this.syncFamilyView()
+      }
     }
   }
 
@@ -263,8 +419,15 @@ export class GraphController {
       this.pendingEdgeRemoves.delete(edge.id)
       existing.removeClass('fading pulse pulse-close')
       this.cy.batch(() => {
-        existing.data('ports', edge.ports)
-        existing.data('portLabel', portLabel(edge.ports))
+        // MERGE ports: CONNECTION_OPENED events carry one conn's port each,
+        // and several conns share one edge — replacing would randomly drop
+        // ports depending on event arrival order
+        const merged = [...new Set([
+          ...((existing.data('ports') as number[] | undefined) ?? []),
+          ...edge.ports,
+        ])]
+        existing.data('ports', merged)
+        existing.data('portLabel', portLabel(merged))
         existing.data('active', edge.active)
         existing.data('recent', true)
       })
@@ -332,7 +495,268 @@ export class GraphController {
     }, 600)
   }
 
+  // ------------------------------------------------------- semantic zoom
+
+  private refreshLabels(): void {
+    const zoom = this.cy.zoom()
+    const bucket: 'far' | 'mid' | 'close' =
+      zoom < ZOOM_FAR ? 'far' : zoom < ZOOM_CLOSE ? 'mid' : 'close'
+    if (bucket === this.zoomBucket && !this.labelDirty) return
+    this.zoomBucket = bucket
+    this.labelDirty = false
+    this.cy.batch(() => {
+      this.cy.nodes('[kind = "PROCESS"]').forEach((n) => {
+        if (n.data('family')) return
+        const name = String(n.data('name') ?? n.data('label') ?? '')
+        if (bucket === 'far') n.data('label', '')
+        else if (bucket === 'mid') n.data('label', name)
+        else {
+          const cpu = Number(n.data('cpu_percent') ?? 0)
+          const mem = Math.round(Number(n.data('memory_mb') ?? 0))
+          n.data('label', `${name}\nPID ${String(n.data('pid') ?? '')} · CPU ${cpu.toFixed(1)}% · ${mem}MB`)
+        }
+      })
+    })
+  }
+
+  private updateLabelVisibility(): void {
+    const show = this.cy.zoom() >= ZOOM_FAR
+    if (show === this.labelsVisible) return
+    this.labelsVisible = show
+    this.cy.batch(() => {
+      this.cy.nodes('[kind != "PROCESS"]').toggleClass('no-labels', !show)
+    })
+  }
+
+  /** Far zoom = wireframe: translucent fills so dense clusters stay legible. */
+  private updateCompactMode(): void {
+    const compact = this.cy.zoom() < 0.35
+    if (compact === this.compactMode) return
+    this.compactMode = compact
+    this.cy.batch(() => {
+      this.cy.nodes().toggleClass('compact', compact)
+    })
+  }
+
+  // ---------------------------------------------------- family (group) view
+
+  private familyOf(): Map<string, string> {
+    // member sid -> family root sid, based on REAL parent relationships:
+    // a process P with >= 2 children C where C.name == P.name forms a family
+    // containing P and those children. Evidence: parent_sid from the backend.
+    const nodes = this.cy.nodes('[kind = "PROCESS"]')
+    const byId = new Map<string, NodeSingular>()
+    nodes.forEach((n) => {
+      byId.set(n.id(), n)
+    })
+    const children = new Map<string, string[]>() // parent sid -> child sids
+    for (const [sid, n] of byId) {
+      const parent = n.data('parent_sid')
+      if (typeof parent === 'string' && byId.has(parent)) {
+        const name = String(n.data('name') ?? '')
+        const pname = String(byId.get(parent)!.data('name') ?? '')
+        if (name && name === pname) {
+          const list = children.get(parent) ?? []
+          list.push(sid)
+          children.set(parent, list)
+        }
+      }
+    }
+    const memberToRoot = new Map<string, string>()
+    for (const [root, kids] of children) {
+      if (kids.length >= 2) {
+        memberToRoot.set(root, root)
+        for (const k of kids) memberToRoot.set(k, root)
+      }
+    }
+    return memberToRoot
+  }
+
+  private familyMembersOf(sid: string): string | undefined {
+    // root of the family containing sid (direct children only, cheap check)
+    const n = this.cy.getElementById(sid)
+    if (!n.length) return undefined
+    const parent = n.data('parent_sid')
+    if (typeof parent !== 'string') return undefined
+    const p = this.cy.getElementById(parent)
+    if (!p.length) return undefined
+    if (String(p.data('name') ?? '') !== String(n.data('name') ?? '')) return undefined
+    const kids = this.cy
+      .nodes('[kind = "PROCESS"]')
+      .filter((c) => c.data('parent_sid') === parent && c.id() !== parent)
+    return kids.length >= 2 ? parent : undefined
+  }
+
+  private syncFamilyView(): void {
+    const memberToRoot = this.familyOf()
+    const roots = new Set(memberToRoot.values())
+    this.cy.batch(() => {
+      // hide members, show (or create) family nodes
+      for (const sid of memberToRoot.keys()) {
+        const el = this.cy.getElementById(sid)
+        if (el.length) el.addClass('fam-hidden')
+      }
+      for (const root of roots) {
+        const members = [...memberToRoot].filter(([, r]) => r === root).map(([sid]) => sid)
+        const famId = `fam:${root}`
+        const rootEl = this.cy.getElementById(root)
+        const name = String(rootEl.data('name') ?? '')
+        const cpu = members.reduce(
+          (s, m) => s + Number(this.cy.getElementById(m).data('cpu_percent') ?? 0), 0,
+        )
+        const mem = members.reduce(
+          (s, m) => s + Number(this.cy.getElementById(m).data('memory_mb') ?? 0), 0,
+        )
+        let fam = this.cy.getElementById(famId)
+        if (!fam.length) {
+          fam = this.cy.add({
+            group: 'nodes',
+            data: {
+              id: famId,
+              kind: 'PROCESS',
+              label: `${name} ×${members.length}`,
+              family: true,
+              member_ids: members,
+              name,
+              pid: rootEl.data('pid'),
+              cpu_percent: cpu,
+              memory_mb: mem,
+              conn_count: members.reduce(
+                (s, m) => s + Number(this.cy.getElementById(m).data('conn_count') ?? 0), 0,
+              ),
+            },
+            position: rootEl.position(),
+          })
+        } else {
+          fam.data('member_ids', members)
+          fam.data('cpu_percent', cpu)
+          fam.data('memory_mb', mem)
+          fam.data('conn_count', members.reduce(
+            (s, m) => s + Number(this.cy.getElementById(m).data('conn_count') ?? 0), 0,
+          ))
+        }
+        this.refreshLabelFor(famId)
+      }
+      // rewire: every edge touching a member routes through the family node
+      const memberSet = new Set(memberToRoot.keys())
+      this.cy.edges().forEach((e) => {
+        const s = e.source().id()
+        const t = e.target().id()
+        const sIn = memberSet.has(s)
+        const tIn = memberSet.has(t)
+        if (!sIn && !tIn) return
+        const ns = sIn ? `fam:${memberToRoot.get(s)}` : s
+        const nt = tIn ? `fam:${memberToRoot.get(t)}` : t
+        let a = ns
+        let b = nt
+        if (e.data('kind') === 'LOCALHOST' && a > b) [a, b] = [b, a]
+        const fid = `fam-e:${a}->${b}:${String(e.data('kind') ?? '')}`
+        const existing = this.cy.getElementById(fid)
+        if (existing.length) {
+          const ports = new Set([...(existing.data('ports') as number[] ?? []), ...(e.data('ports') as number[] ?? [])])
+          existing.data('ports', [...ports])
+          existing.data('portLabel', portLabel([...ports]))
+        } else {
+          this.cy.add({
+            group: 'edges',
+            data: {
+              id: fid, source: a, target: b, kind: e.data('kind'),
+              proto: e.data('proto'), ports: e.data('ports') ?? [],
+              active: e.data('active') === true, directed: e.data('directed') === true,
+              famEdge: true,
+            },
+          })
+        }
+        e.addClass('fam-hidden')
+      })
+      // clean up stale family nodes/edges whose family disappeared
+      this.cy.nodes('[?family]').forEach((n) => {
+        if (!roots.has(String(n.id()).replace(/^fam:/, ''))) n.remove()
+      })
+      this.cy.edges('[?famEdge]').forEach((e) => {
+        const src = e.source().id()
+        const tgt = e.target().id()
+        if (!src.startsWith('fam:') && !tgt.startsWith('fam:')) e.remove()
+      })
+      // unhide non-member nodes
+      this.cy.nodes().forEach((n) => {
+        if (n.data('family')) return
+        if (!memberSet.has(n.id())) n.removeClass('fam-hidden')
+      })
+      this.cy.edges().forEach((e) => {
+        if (e.data('famEdge')) return
+        const s = e.source().id()
+        const t = e.target().id()
+        if (!memberSet.has(s) && !memberSet.has(t)) e.removeClass('fam-hidden')
+      })
+    })
+    if (this.pendingNewNodes > 0) {
+      this.pendingNewNodes = 0
+      this.runLayout('incremental')
+    }
+  }
+
+  private teardownFamilyView(): void {
+    this.cy.batch(() => {
+      this.cy.nodes('[?family]').remove()
+      this.cy.edges('[?famEdge]').remove()
+      this.cy.nodes().removeClass('fam-hidden')
+      this.cy.edges().removeClass('fam-hidden')
+    })
+  }
+
+  // -------------------------------------------------------------- focus
+
+  setFocus(nodeId: string | null, hops = 1): void {
+    this.focusNode = nodeId
+    this.focusHops = hops
+    this.applyFocus()
+  }
+
+  private applyFocus(): void {
+    this.cy.batch(() => {
+      this.cy.elements().removeClass('focus-dim')
+      if (!this.focusNode) return
+      const start = this.cy.getElementById(this.focusNode)
+      if (!start.length) return
+      const reachable = new Set<string>([this.focusNode])
+      let frontier = [this.focusNode]
+      for (let h = 0; h < this.focusHops; h++) {
+        const next: string[] = []
+        for (const id of frontier) {
+          const el = this.cy.getElementById(id)
+          if (!el.length) continue
+          el.connectedEdges().forEach((e) => {
+            for (const end of [e.source().id(), e.target().id()]) {
+              if (!reachable.has(end)) {
+                reachable.add(end)
+                next.push(end)
+              }
+            }
+          })
+        }
+        frontier = next
+      }
+      this.cy.nodes().forEach((n) => {
+        if (!reachable.has(n.id())) n.addClass('focus-dim')
+      })
+      this.cy.edges().forEach((e) => {
+        if (!reachable.has(e.source().id()) || !reachable.has(e.target().id())) {
+          e.addClass('focus-dim')
+        }
+      })
+    })
+  }
+
   // ------------------------------------------------------------ layout / view
+
+  private refreshLabelFor(id: string): void {
+    const el = this.cy.getElementById(id)
+    if (!el.length || !el.data('family')) return
+    const name = String(el.data('name') ?? '')
+    const count = (el.data('member_ids') as string[] | undefined)?.length ?? 0
+    el.data('label', `${name} ×${count}`)
+  }
 
   private runLayout(kind: 'initial' | 'incremental'): void {
     const options = {
@@ -341,8 +765,8 @@ export class GraphController {
       randomize: kind === 'initial',
       animate: kind !== 'initial',
       animationDuration: 350,
-      nodeRepulsion: kind === 'initial' ? 20000 : 6000,
-      idealEdgeLength: kind === 'initial' ? 170 : 110,
+      nodeRepulsion: kind === 'initial' ? 24000 : 6000,
+      idealEdgeLength: kind === 'initial' ? 185 : 110,
       gravity: kind === 'initial' ? 0.05 : 0.2,
       numIter: kind === 'initial' ? 2000 : 300,
       // tiling arranges components into a rigid grid — off for an organic map
@@ -472,6 +896,93 @@ export class GraphController {
     return { ...el.data() }
   }
 
+  selectedCount(): number {
+    return this.cy.elements(':selected').length
+  }
+
+  clearSelection(): void {
+    this.cy.elements(':selected').unselect()
+  }
+
+  // ------------------------------------------------------- shift+box select
+
+  private selBox: HTMLDivElement | null = null
+  private selStart: { x: number; y: number } | null = null
+  private selPending = false
+
+  /**
+   * Shift + drag on the background draws a rubber-band selection box.
+   * Implemented with capture-phase listeners that stop propagation once a
+   * real drag is detected, so normal left-drag panning is never hijacked.
+   */
+  initShiftBoxSelection(): void {
+    const container = this.cy.container()
+    if (!container) return
+    const rect = (): DOMRect => container.getBoundingClientRect()
+    const onDown = (e: MouseEvent): void => {
+      if (e.button !== 0 || !e.shiftKey) return
+      this.selPending = true
+      const r = rect()
+      this.selStart = { x: e.clientX - r.left, y: e.clientY - r.top }
+    }
+    const onMove = (e: MouseEvent): void => {
+      if (!this.selPending || !this.selStart) return
+      const r = rect()
+      const x = e.clientX - r.left
+      const y = e.clientY - r.top
+      if (!this.selBox && Math.hypot(x - this.selStart.x, y - this.selStart.y) > 6) {
+        e.stopPropagation() // cytoscape's pan must not start
+        this.selBox = document.createElement('div')
+        this.selBox.className = 'sel-box'
+        container.appendChild(this.selBox)
+      }
+      if (this.selBox) {
+        e.stopPropagation()
+        const x1 = Math.min(this.selStart.x, x)
+        const y1 = Math.min(this.selStart.y, y)
+        this.selBox.style.left = `${x1}px`
+        this.selBox.style.top = `${y1}px`
+        this.selBox.style.width = `${Math.abs(x - this.selStart.x)}px`
+        this.selBox.style.height = `${Math.abs(y - this.selStart.y)}px`
+      }
+    }
+    const onUp = (e: MouseEvent): void => {
+      this.selPending = false
+      if (!this.selBox || !this.selStart) return
+      e.stopPropagation()
+      const r = rect()
+      const x = e.clientX - r.left
+      const y = e.clientY - r.top
+      const x1 = Math.min(this.selStart.x, x)
+      const y1 = Math.min(this.selStart.y, y)
+      const x2 = Math.max(this.selStart.x, x)
+      const y2 = Math.max(this.selStart.y, y)
+      const inBox = (px: number, py: number): boolean =>
+        px >= x1 && px <= x2 && py >= y1 && py <= y2
+      this.cy.batch(() => {
+        this.cy.nodes().forEach((n) => {
+          const p = n.renderedPosition()
+          if (inBox(p.x, p.y)) n.select()
+        })
+      })
+      this.selBox.remove()
+      this.selBox = null
+      this.selStart = null
+    }
+    // capture phase: runs before cytoscape's bubble-phase handlers
+    container.addEventListener('mousedown', onDown, true)
+    container.addEventListener('mousemove', onMove, true)
+    container.addEventListener('mouseup', onUp, true)
+    this.selBoxCleanup = () => {
+      container.removeEventListener('mousedown', onDown, true)
+      container.removeEventListener('mousemove', onMove, true)
+      container.removeEventListener('mouseup', onUp, true)
+      this.selBox?.remove()
+    }
+  }
+
+  private selBoxCleanup: (() => void) | null = null
+
   // --------------------------------------------------------------- tooltip
 
   private showTooltip(edge: EdgeSingular): void {
@@ -484,15 +995,28 @@ export class GraphController {
       y: mid.y * this.cy.zoom() + this.cy.pan().y,
     }
     const kindText = String(d.kind ?? '')
-    const text =
-      `${kindText} · ${String(d.proto ?? '')} · ${uniq.length} conn${uniq.length === 1 ? '' : 's'}` +
-      (uniq.length ? ` · ports ${uniq.slice(0, 6).join(', ')}${uniq.length > 6 ? '…' : ''}` : '')
+    const srcLabel = String(edge.source().data('label') || edge.source().data('name') || edge.source().id()).split('\n')[0]
+    const tgtLabel = String(edge.target().data('label') || edge.target().data('name') || edge.target().id()).split('\n')[0]
+    const act = this.edgeActivity.get(edge.id())
+    const rows: string[] = []
+    rows.push(`${kindText} · ${String(d.proto ?? '')} · ${uniq.length} conn${uniq.length === 1 ? '' : 's'}`)
+    rows.push(`${srcLabel} → ${tgtLabel}`)
+    rows.push(`ports ${uniq.slice(0, 6).join(', ')}${uniq.length > 6 ? '…' : ''}`)
+    // traffic fields ONLY when actual telemetry exists for this edge
+    if (act && (act.fwdBps > 0 || act.revBps > 0)) {
+      rows.push(`Traffic: ↓ ${fmtBps(act.revBps)} · ↑ ${fmtBps(act.fwdBps)}`)
+      const ageMs = Math.round(performance.now() - act.lastActivity)
+      rows.push(`Last activity: ${ageMs} ms ago`)
+    } else {
+      rows.push('Traffic: — (no observed activity)')
+    }
+    rows.push(`Telemetry: ${this.telemetrySource}`)
     if (!this.tooltip) {
       this.tooltip = document.createElement('div')
       this.tooltip.className = 'edge-tooltip'
       this.cy.container()?.parentElement?.appendChild(this.tooltip)
     }
-    this.tooltip.textContent = text
+    this.tooltip.innerHTML = rows.map((r) => `<div>${r}</div>`).join('')
     this.tooltip.style.left = `${pos.x + 12}px`
     this.tooltip.style.top = `${pos.y - 12}px`
     this.tooltip.style.display = 'block'
@@ -503,8 +1027,7 @@ export class GraphController {
   }
 
   destroy(): void {
-    window.clearTimeout(this.layoutTimer)
+    this.selBoxCleanup?.()
     this.overlay.destroy()
-    this.tooltip?.remove()
   }
 }

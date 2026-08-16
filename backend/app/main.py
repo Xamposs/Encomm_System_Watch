@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -18,10 +19,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import Settings
-from .models.entities import Snapshot
+from .models.entities import Event, Snapshot
 from .services.diff_engine import DiffEngine
 from .services.event_stream import EventStream
 from .services.topology import TopologyEngine
+from .telemetry import (
+    EVENT_TELEMETRY_CAPABILITY_CHANGED,
+    ActivityAggregator,
+    AdapterTotalsSampler,
+    Capability,
+    EtwTcpipProvider,
+)
 
 log = logging.getLogger("esw")
 
@@ -56,6 +64,12 @@ stream = EventStream()
 topo_engine = TopologyEngine(cfg)
 diff_engine = DiffEngine(cfg)
 
+# ---- network telemetry ----------------------------------------------------
+telemetry_enabled = cfg.telemetry_enabled and not cfg.demo_mode
+aggregator = ActivityAggregator(cfg)
+adapter_sampler = AdapterTotalsSampler()
+telemetry_provider = EtwTcpipProvider() if telemetry_enabled else None
+
 _state = {
     "snapshot": None,
     "topology": None,
@@ -64,24 +78,93 @@ _state = {
     "loop_ok": False,
     "last_tick": 0.0,
     "skipped": 0,
+    "telemetry": None,   # Capability.to_dict()
+    "adapter": None,     # {"down_bps": .., "up_bps": ..} adapter totals
 }
 
 
+def _capability_dict() -> dict:
+    cap = _state.get("telemetry")
+    if cap is None:
+        cap = Capability().to_dict()
+    return cap
+
+
+def _init_telemetry() -> None:
+    """Probe the network activity source once at startup.
+
+    Never auto-elevates: when the ETW provider needs administrator rights it
+    reports exactly that and SYSTEM WATCH continues on the socket-lifecycle
+    tier.
+    """
+    if telemetry_provider is None:
+        cap = Capability(
+            level="TIER0", source="DISABLED",
+            detail="network telemetry disabled (demo mode or ESW_TELEMETRY_ENABLED=0)",
+            enabled=False,
+        )
+    else:
+        telemetry_provider.start()
+        cap = telemetry_provider.capability()
+    aggregator.set_capability(cap)
+    _state["telemetry"] = cap.to_dict()
+    if telemetry_provider is not None:
+        stream.publish([_capability_event(cap, "TEL-INIT")])
+
+
+def _capability_event(cap: Capability, event_id: str) -> dict:
+    return Event(
+        event_id=event_id,
+        event_type=EVENT_TELEMETRY_CAPABILITY_CHANGED,
+        source="telemetry", target=None,
+        timestamp=datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        metadata=cap.to_dict(),
+    ).to_dict()
+
+
 def _stats_dict() -> dict:
-    topo = _state.get("topology")
-    if topo is None:
-        return {"processes": 0, "active_conns": 0, "listening": 0,
-                "cpu_percent": 0.0, "mem_percent": 0.0, "ts": time.time(), "mode": _state["mode"]}
-    s = topo.stats
-    return {
-        "processes": s.processes,
-        "active_conns": s.active_conns,
-        "listening": s.listening,
-        "cpu_percent": s.cpu_percent,
-        "mem_percent": s.mem_percent,
-        "ts": s.ts,
+    cap = _capability_dict()
+    base = {
+        "processes": 0, "active_conns": 0, "listening": 0,
+        "cpu_percent": 0.0, "mem_percent": 0.0, "ts": time.time(),
         "mode": _state["mode"],
+        "telemetry": cap,
     }
+    topo = _state.get("topology")
+    if topo is not None:
+        s = topo.stats
+        base.update({
+            "processes": s.processes,
+            "active_conns": s.active_conns,
+            "listening": s.listening,
+            "cpu_percent": s.cpu_percent,
+            "mem_percent": s.mem_percent,
+            "ts": s.ts,
+        })
+    # NETWORK: captured telemetry when Tier 2 is active, otherwise adapter
+    # totals. The two are different measurements; both are reported and the
+    # UI labels the source explicitly. Never fake zeroes when unavailable.
+    adapter = _state.get("adapter")
+    net = None
+    if cap.get("level") == "TIER2":
+        totals = aggregator.totals()
+        net = {
+            "down_bps": totals["down_bps"],
+            "up_bps": totals["up_bps"],
+            "source": "CAPTURED",
+            "adapter_down_bps": round(adapter["down_bps"], 1) if adapter else 0.0,
+            "adapter_up_bps": round(adapter["up_bps"], 1) if adapter else 0.0,
+        }
+    elif adapter is not None:
+        net = {
+            "down_bps": adapter["down_bps"],
+            "up_bps": adapter["up_bps"],
+            "source": "ADAPTER_TOTALS",
+            "adapter_down_bps": adapter["down_bps"],
+            "adapter_up_bps": adapter["up_bps"],
+        }
+    base["net"] = net
+    return base
 
 
 def _snapshot_message() -> dict:
@@ -93,9 +176,46 @@ def _snapshot_message() -> dict:
         "mode": _state["mode"],
         "ts": _state["last_tick"],
         "stats": _stats_dict(),
+        "telemetry": _capability_dict(),
         "nodes": nodes,
         "edges": edges,
     }
+
+
+async def _telemetry_loop() -> None:
+    """Flush aggregated network activity in small batches (~5 msg/s max).
+
+    Raw per-packet events never reach the WebSocket; only compact per-edge
+    batches do. Also watches provider health and demotes the capability tier
+    truthfully if the ETW session dies.
+    """
+    while True:
+        try:
+            items, bursts, node_items = aggregator.flush()
+        except Exception:  # noqa: BLE001 — telemetry must never kill the app
+            items, bursts, node_items = [], [], []
+        if items or node_items:
+            stream.publish_message({
+                "type": "network_activity",
+                "window_ms": cfg.telemetry_flush_ms,
+                "ts": time.time(),
+                "items": items,
+                "nodes": node_items,
+            })
+        if bursts:
+            stream.publish([e.to_dict() for e in bursts])
+        if telemetry_provider is not None and _state.get("telemetry", {}).get("level") == "TIER2":
+            if not telemetry_provider.alive():
+                cap = Capability(
+                    level="TIER0", source="NONE",
+                    detail="ETW session ended; falling back to socket lifecycle",
+                    elevation_required=True,
+                )
+                aggregator.set_capability(cap)
+                _state["telemetry"] = cap.to_dict()
+                log.warning("telemetry provider died — demoted to TIER0")
+                stream.publish([_capability_event(cap, "TEL-DEAD")])
+        await asyncio.sleep(max(0.05, cfg.telemetry_flush_ms / 1000.0))
 
 
 async def _collect_loop() -> None:
@@ -110,6 +230,14 @@ async def _collect_loop() -> None:
                             owner_map=owner_map, system=system)
             topo = topo_engine.build(snap)
             events = diff_engine.diff(snap, topo)
+            aggregator.set_topology(snap, topo)
+            if not cfg.demo_mode:
+                adapter = adapter_sampler.sample()
+                if adapter is not None:
+                    _state["adapter"] = {
+                        "down_bps": round(adapter[0], 1),
+                        "up_bps": round(adapter[1], 1),
+                    }
             _state["snapshot"] = snap
             _state["topology"] = topo
             _state["last_tick"] = snap.ts
@@ -129,16 +257,25 @@ async def _collect_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _init_telemetry()
     task = asyncio.create_task(_collect_loop())
+    ttask = asyncio.create_task(_telemetry_loop())
     yield
     task.cancel()
+    ttask.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
+    try:
+        await ttask
+    except asyncio.CancelledError:
+        pass
+    if telemetry_provider is not None:
+        telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -186,6 +323,12 @@ async def api_state() -> StateResponse:
                          nodes=msg["nodes"], edges=msg["edges"])
 
 
+@app.get("/api/telemetry")
+async def api_telemetry() -> dict:
+    """Current network telemetry capability (honest: what actually works)."""
+    return _capability_dict()
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
@@ -200,16 +343,25 @@ async def ws_endpoint(ws: WebSocket) -> None:
         last_stats = 0.0
         while True:
             try:
-                ev = await asyncio.wait_for(queue.get(), timeout=0.5)
-                batch = [ev]
-                while len(batch) < cfg.max_event_batch:
-                    try:
-                        batch.append(queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-                await ws.send_json({"type": "events", "data": batch})
+                item = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
-                pass
+                item = None
+            if item is not None:
+                if item.get("type") == "network_activity":
+                    # already a complete protocol message (activity batch)
+                    await ws.send_json(item)
+                else:
+                    batch = [item]
+                    while len(batch) < cfg.max_event_batch:
+                        try:
+                            nxt = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if nxt.get("type") == "network_activity":
+                            await ws.send_json(nxt)
+                            continue
+                        batch.append(nxt)
+                    await ws.send_json({"type": "events", "data": batch})
             now = time.time()
             if now - last_stats >= 2.0:
                 await ws.send_json({"type": "stats", "data": _stats_dict()})

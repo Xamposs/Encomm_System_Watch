@@ -1,4 +1,5 @@
 import type { Core, EdgeSingular } from 'cytoscape'
+import type { NetworkActivityItem } from '../types/system'
 
 export type PulseKind = 'open' | 'close' | 'update'
 
@@ -8,26 +9,71 @@ interface Pulse {
   kind: PulseKind
 }
 
-const COLORS: Record<PulseKind, string> = {
+/** One traveling particle caused by ACTUAL observed bytes. */
+interface DataParticle {
+  edgeId: string
+  /** +1 = source->target (forward), -1 = target->source (reverse) */
+  dir: 1 | -1
+  t: number // 0..1 progress along the edge
+  dur: number // ms to travel the edge
+  size: number
+  born: number
+}
+
+interface EdgeActivity {
+  fwdBps: number
+  revBps: number
+  lastActivity: number // performance.now() of the last observed activity
+  level: number // 1 low, 2 medium, 3 high
+  lastSpawn: number
+}
+
+const PULSE_COLORS: Record<PulseKind, string> = {
   open: '#35e0ff',
   close: '#ff5d5d',
   update: '#8affb0',
 }
 
+// directional data particles: forward = OUT (process -> remote), reverse = IN
+const FWD_COLOR = '#35e0ff'
+const REV_COLOR = '#ffb35c'
+
 const MAX_PULSES = 30
 const MAX_RECENT = 80
+const MAX_PARTICLES = 140
+const MAX_PER_EDGE = 6
+
+// activity freshness windows (ms) — mirrors the backend decay model
+const ACTIVE_MS = 500
+const RECENT_MS = 5000
+
+// spawn cadence per activity level (ms between particle launches per edge)
+const SPAWN_INTERVAL: Record<number, number> = { 1: 1600, 2: 700, 3: 300 }
 
 /**
  * Canvas overlay that draws traveling "signal" particles along Cytoscape
- * edges. Only edges that actually have activity are drawn, so the cost is
- * proportional to real system activity — not the graph size. Rendering is
- * rAF-driven and stops entirely when idle.
+ * edges. There are two strictly separate signal classes:
+ *
+ *  1. LIFECYCLE pulses  — CONNECTION_OPENED / CLOSED / UPDATE events
+ *                         (pulse(), kind open|close|update)
+ *  2. DATA particles    — actual observed network bytes from the backend
+ *                         telemetry aggregator (applyActivity()): direction
+ *                         is real (fwd/rev), intensity scales with the
+ *                         observed rate, and particles stop ~500 ms after
+ *                         the last observed activity (ACTIVE -> RECENT ->
+ *                         IDLE decay). A connection that merely stays open
+ *                         NEVER animates.
+ *
+ * Rendering is rAF-driven and stops entirely when nothing is active, so the
+ * cost is proportional to real activity, not graph size.
  */
 export class EdgePulseOverlay {
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private pulses = new Map<string, Pulse>()
   private recent = new Map<string, number>()
+  private activity = new Map<string, EdgeActivity>()
+  private particles: DataParticle[] = []
   private running = false
   private raf = 0
   private ro: ResizeObserver
@@ -60,6 +106,8 @@ export class EdgePulseOverlay {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   }
 
+  // ------------------------------------------------------ lifecycle pulses
+
   pulse(edgeId: string, kind: PulseKind): void {
     if (this.pulses.has(edgeId)) this.pulses.delete(edgeId)
     this.pulses.set(edgeId, {
@@ -86,6 +134,59 @@ export class EdgePulseOverlay {
     this.ensureRunning()
   }
 
+  // ---------------------------------------------------- data activity feed
+
+  /** Feed one aggregated activity batch (from the backend, ~5 msg/s max). */
+  applyActivity(items: NetworkActivityItem[]): void {
+    const now = performance.now()
+    const touched = new Set<string>()
+    for (const it of items) {
+      touched.add(it.edge_id)
+      const prev = this.activity.get(it.edge_id)
+      this.activity.set(it.edge_id, {
+        fwdBps: it.fwd_bps,
+        revBps: it.rev_bps,
+        lastActivity: now,
+        level: it.level,
+        lastSpawn: prev?.lastSpawn ?? 0,
+      })
+    }
+    // prune edges that stopped reporting and are no longer active/recent
+    for (const [eid, st] of this.activity) {
+      if (touched.has(eid)) continue
+      if (now - st.lastActivity > RECENT_MS) this.activity.delete(eid)
+    }
+    if (this.activity.size > 400) {
+      // bounded memory: keep only the most recently active
+      const sorted = [...this.activity.entries()].sort(
+        (a, b) => b[1].lastActivity - a[1].lastActivity,
+      )
+      this.activity = new Map(sorted.slice(0, 400))
+    }
+    if (items.length > 0) this.ensureRunning()
+  }
+
+  private spawnParticle(edgeId: string, st: EdgeActivity): void {
+    const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
+    if (edge.length === 0 || edge.removed()) return
+    const own = this.particles.filter((p) => p.edgeId === edgeId)
+    if (own.length >= MAX_PER_EDGE) return
+    if (this.particles.length >= MAX_PARTICLES) return
+    const total = st.fwdBps + st.revBps
+    if (total <= 0) return
+    // weighted direction: whichever direction actually carries bytes
+    const dir: 1 | -1 = Math.random() < st.fwdBps / total ? 1 : -1
+    const dur = 650 + Math.random() * 350
+    this.particles.push({
+      edgeId,
+      dir,
+      t: 0,
+      dur,
+      size: 1.6 + Math.min(1.4, Math.sqrt(st.level) * 0.5),
+      born: performance.now(),
+    })
+  }
+
   private ensureRunning(): void {
     if (!this.running) {
       this.running = true
@@ -109,27 +210,60 @@ export class EdgePulseOverlay {
   private loop = (): void => {
     this.raf = requestAnimationFrame(this.loop)
     const now = performance.now()
-    if (this.pulses.size === 0 && this.recent.size === 0) {
+
+    // spawn data particles for ACTIVE edges (actual observed traffic)
+    for (const [edgeId, st] of this.activity) {
+      const age = now - st.lastActivity
+      if (age >= ACTIVE_MS) continue
+      const interval = SPAWN_INTERVAL[st.level] ?? 1600
+      if (now - st.lastSpawn >= interval) {
+        st.lastSpawn = now
+        this.spawnParticle(edgeId, st)
+      }
+    }
+
+    // advance particles; drop finished ones
+    const alive: DataParticle[] = []
+    for (const p of this.particles) {
+      const edge = this.cy.getElementById(p.edgeId) as unknown as EdgeSingular
+      if (edge.length === 0 || edge.removed()) continue
+      // a particle in flight may finish its travel even as decay sets in
+      p.t = Math.min(1, (now - p.born) / p.dur)
+      if (p.t < 1) alive.push(p)
+    }
+    this.particles = alive
+
+    const hasData = this.activity.size > 0
+    const hasRecent = this.recent.size > 0
+    const hasPulses = this.pulses.size > 0
+    if (!hasData && !hasRecent && !hasPulses && this.particles.length === 0) {
       cancelAnimationFrame(this.raf)
       this.running = false
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
       return
     }
+
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
     const zoom = Math.max(0.4, this.cy.zoom())
 
-    // subtle continuous dots on recently-active edges
+    // --- faint traveling dots on recently-active edges (RECENT decay) ---
+    // both lifecycle recents and data-activity recents (500ms..5s since bytes)
+    const slowDots = new Set<string>()
     for (const [edgeId, until] of this.recent) {
       if (now > until) {
         this.recent.delete(edgeId)
         continue
       }
+      slowDots.add(edgeId)
+    }
+    for (const [edgeId, st] of this.activity) {
+      const age = now - st.lastActivity
+      if (age >= ACTIVE_MS && age < RECENT_MS) slowDots.add(edgeId)
+    }
+    for (const edgeId of slowDots) {
       const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
-      if (edge.length === 0 || edge.removed()) {
-        this.recent.delete(edgeId)
-        continue
-      }
+      if (edge.length === 0 || edge.removed()) continue
       const t = (now % 2600) / 2600
       const p = this.toRender(this.pointOn(edge, t))
       ctx.beginPath()
@@ -138,7 +272,36 @@ export class EdgePulseOverlay {
       ctx.fill()
     }
 
-    // strong traveling pulses for real events
+    // --- directional data particles (ACTUAL bytes, real direction) -------
+    for (const p of this.particles) {
+      const edge = this.cy.getElementById(p.edgeId) as unknown as EdgeSingular
+      if (edge.length === 0 || edge.removed()) continue
+      const headT = p.dir === 1 ? p.t : 1 - p.t
+      const head = this.toRender(this.pointOn(edge, headT))
+      const color = p.dir === 1 ? FWD_COLOR : REV_COLOR
+      ctx.save()
+      ctx.shadowColor = color
+      ctx.shadowBlur = 8 * zoom
+      ctx.beginPath()
+      ctx.arc(head.x, head.y, p.size * zoom, 0, Math.PI * 2)
+      ctx.fillStyle = color
+      ctx.fill()
+      ctx.restore()
+      for (let i = 1; i <= 4; i++) {
+        const tt = p.t - i * 0.05
+        if (tt < 0) break
+        const p2 = this.toRender(this.pointOn(edge, p.dir === 1 ? tt : 1 - tt))
+        const a = 0.35 * (1 - i / 5)
+        ctx.beginPath()
+        ctx.arc(p2.x, p2.y, p.size * 0.75 * zoom * (1 - i / 10), 0, Math.PI * 2)
+        ctx.fillStyle = color
+        ctx.globalAlpha = a
+        ctx.fill()
+      }
+      ctx.globalAlpha = 1
+    }
+
+    // --- lifecycle pulses (open/close/update events) ---------------------
     for (const [edgeId, pulse] of this.pulses) {
       const t = (now - pulse.start) / pulse.dur
       if (t >= 1) {
@@ -150,7 +313,7 @@ export class EdgePulseOverlay {
         this.pulses.delete(edgeId)
         continue
       }
-      const color = COLORS[pulse.kind]
+      const color = PULSE_COLORS[pulse.kind]
       const head = this.toRender(this.pointOn(edge, t))
       ctx.save()
       ctx.shadowColor = color

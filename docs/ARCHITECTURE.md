@@ -24,6 +24,24 @@ FRONTEND STATE  (React hook + imperative graph controller)
 CYTOSCAPE GRAPH  (canvas pulse overlay on top)
 ```
 
+Network activity (v0.2) plugs into the same pipeline:
+
+```
+WINDOWS NETWORK ACTIVITY SOURCE   (ETW Microsoft-Windows-TCPIP, if permitted)
+        ↓
+ACTIVITY NORMALIZER              (pid + 4-tuple + direction + size; metadata only)
+        ↓
+ACTIVITY AGGREGATOR              (200 ms windows, edge mapping, rates, bursts)
+        ↓
+TOPOLOGY EDGE MAPPING            (tuple → edge evidence, rebuilt every tick)
+        ↓
+WEBSOCKET ACTIVITY BATCH         (network_activity, ≤ ~5 msg/s)
+        ↓
+GraphController                  (per-edge activity state, decay)
+        ↓
+EdgePulseOverlay                 (directional particles, rAF, idle-stops)
+```
+
 ## Layer by layer
 
 ### 1. Collectors (`backend/app/collectors/`)
@@ -61,6 +79,8 @@ Converts a snapshot into `nodes`, `edges`, `conn_targets` and `stats`.
 - Edges are aggregated per `(source, target, kind)` with port lists, so N
   sockets to the same remote host produce one edge with N ports — this keeps
   the graph at topology scale, not socket scale.
+- Process nodes carry `parent_sid` (real PPID evidence) so the frontend can
+  build FAMILY (parent/child) grouping without guessing.
 
 ### 4. Diff / event engine (`services/diff_engine.py`)
 
@@ -72,19 +92,69 @@ Compares consecutive snapshots and emits only truthful events:
 | `PROCESS_STOPPED` | stable id gone |
 | `CONNECTION_OPENED` | new connection key (carries edge id + node dicts) |
 | `CONNECTION_CLOSED` | key gone (carries `remaining` count on the edge) |
-| `PROCESS_METRICS_UPDATED` | |ΔCPU| ≥ 2 % or |ΔRAM| ≥ 16 MB or 10 s force; capped at 60/tick |
+| `PROCESS_METRICS_UPDATED` | \|ΔCPU\| ≥ 2 % or \|ΔRAM\| ≥ 16 MB or 10 s force; capped at 60/tick |
+| `TRAFFIC_BURST` | edge bytes ≥ 200 KB in one 200 ms window (rate-limited 10 s/edge, conservative, no classification) |
+| `TELEMETRY_CAPABILITY_CHANGED` | telemetry provider started / died / demoted |
 
 When a process stops, its connections are *not* re-reported as individual
 close events — the node dies with its edges. Events are ordered
 (started → opened → closed → metrics) so the frontend can apply them
 incrementally.
 
-### 5. FastAPI + WebSocket (`services/event_stream.py`, `main.py`)
+Startup/exit race handling: psutil can transiently miss a mid-startup process
+or attribute a fresh socket to `pid=None` (SYSTEM). The engine suppresses a
+stopped owner's connection events **only when the socket tuples are also gone**
+from the current snapshot — otherwise real opens/closes would be silently
+swallowed and edges would never appear on clients.
+
+### 5. Network telemetry (`backend/app/telemetry/`)
+
+Abstraction over Windows network activity sources with honest capability
+detection. **Tiers:**
+
+| Tier | What | Source |
+|---|---|---|
+| TIER2 | per-connection/per-edge byte activity | ETW `Microsoft-Windows-TCPIP` |
+| TIER0 | socket lifecycle only (open/close) | psutil topology (always works) |
+| — | system adapter totals (header bandwidth) | psutil per-interface counters (always works) |
+
+- `base.py` — `NetworkActivityEvent` (pid, 4-tuple, direction, size — metadata
+  only), `Capability`, provider interface, per-edge/per-process rate state.
+- `windows_network.py` — `EtwTcpipProvider`: realtime ETW session on
+  Microsoft-Windows-TCPIP via pywintrace; SEND/RECEIVE task names give
+  direction; payload bytes are never touched (only the size field). An
+  unelevated session fails with ERROR_ACCESS_DENIED — the provider detects
+  this, reports `elevation_required`, and the app stays on TIER0. SYSTEM
+  WATCH never auto-elevates. `AdapterTotalsSampler` — system-wide
+  down/up bps from per-interface counters (loopback excluded), labeled
+  separately from captured telemetry.
+- `activity_aggregator.py` — 200 ms aggregation windows; raw events are mapped
+  to topology edges via (pid, 4-tuple) evidence rebuilt each tick; per-edge
+  directional rates (1 s EMA) and activity levels; ACTIVE (< 500 ms) /
+  RECENT (< 5 s) / IDLE decay timestamps; per-process totals for the node
+  inspector/halo; conservative TRAFFIC_BURST detection. Events that cannot be
+  mapped to a specific edge are attributed to the owning process (node halo)
+  or dropped — never faked onto a random edge.
+
+**Fallback chain** (documented + tested): ETW TIER2 → TIER0. If the ETW
+session dies at runtime, a `TELEMETRY_CAPABILITY_CHANGED` event is emitted
+and the header chip downgrades honestly. Adapter totals remain available at
+every tier.
+
+Why ETW and not alternatives (all measured on this machine, unelevated):
+`GetPerTcpConnectionEStats` (per-connection byte counters) returns
+ERROR_ACCESS_DENIED; the NDU analytic provider is also access-denied. Both
+would need elevation like ETW, and ETW additionally covers UDP and gives
+explicit direction. Documented, not used.
+
+### 6. FastAPI + WebSocket (`services/event_stream.py`, `main.py`)
 
 - `GET /api/health` — loop health, error counters, last-tick age.
 - `GET /api/state` — current full topology (debugging).
+- `GET /api/telemetry` — current capability tier + reason (honest indicator).
 - `WS /ws` — on connect: full snapshot (once). Then: event batches (≤100),
-  stats every 2 s, heartbeat ping. No periodic full re-transmission.
+  `network_activity` batches (≤ ~5/s), stats every 2 s (with `net` block +
+  telemetry info), heartbeat ping. No periodic full re-transmission.
 - `EventStream` is an async pub/sub bus; slow clients drop oldest events
   instead of blocking the collector.
 - The collector loop runs `collect → build topology → diff → publish` every
@@ -92,34 +162,55 @@ incrementally.
   and logged without killing the loop.
 - If `frontend/dist` exists, the backend also serves the built UI at `/`.
 
-### 6. Frontend (`frontend/src/`)
+### 7. Frontend (`frontend/src/`)
 
 - `services/ws.ts` — WebSocket client: relative URL (works in dev via Vite
   proxy and in prod via the backend), exponential backoff reconnect, 12 s
   dead-link watchdog (the server sends stats every 2 s, so silence means
   dead).
 - `hooks/useSystemWatch.ts` — React state only for *derived UI* (stats,
-  events, selection, connection status). Graph mutations bypass React.
+  events, selection, connection status, telemetry chip). Graph mutations
+  bypass React.
 - `graph/GraphController.ts` — one Cytoscape instance for the app lifetime;
   `cy.batch` upserts; snapshot → full replace + fcose layout; events →
-  incremental add/update/fade-remove; filters and search apply `hidden` /
-  `dimmed` / `searchMatch` data flags (layout preserved, nothing deleted).
+  incremental add/update/fade-remove. Per-edge activity state feeds edge
+  styling (`actLow/actMed/actHigh`) and the pulse overlay. Port lists on
+  shared edges are **merged** on every open event (never replaced), so
+  multi-connection edges stay stable regardless of event order.
 - `graph/EdgePulseOverlay.ts` — a transparent canvas above the graph draws
   traveling particles only for edges with real activity; the rAF loop stops
-  when idle. Strong pulse for `open`/`close`, subtle slow flow for
-  recently-active edges (`recent` data flag, 3.5 s TTL).
-- Labels are hidden below zoom 0.45 so the fitted map stays clean; zooming in
-  reveals process names/PID/CPU/RAM.
+  when idle. Two strictly separate signal classes:
+  1. lifecycle pulses (`open`/`close`/`update` — socket events);
+  2. directional **data** particles from real observed bytes (forward =
+     source→target, reverse = target→source; spawn rate scales with the
+     observed rate; stops ~500 ms after the last activity).
+- Semantic zoom: far = wireframe (translucent fills, bright borders) with no
+  labels; medium = process names; close = name + PID + CPU + RAM.
+- FAMILY view (NODES/FAMILIES toggle): real parent/child process trees
+  (parent_sid evidence) collapse into `chrome.exe ×N` nodes; the underlying
+  topology is untouched and restored on toggle-back.
+- FOCUS mode: double-click a node → 1-hop or 2-hop neighborhood emphasized,
+  everything else dimmed (visualization only).
+- Multi-select: shift+click toggles, shift+drag draws a rubber-band box
+  (inspection only; left-drag panning is never hijacked).
+- Edge hover tooltip shows endpoints, ports, and — only when real telemetry
+  exists — directional rates and last-activity age, plus the telemetry
+  source.
 - Layout: fcose, `randomize` once on connect; incremental passes with
-  `fit: false` afterwards so the user's viewport never jumps.
+  `fit: false` afterwards so the user's viewport never jumps. New nodes are
+  placed near a known neighbor when the event carries one.
 
-### 7. Performance model
+### 8. Performance model
 
 - Snapshot is transmitted once; updates are event deltas (a few bytes each).
+- Raw per-packet telemetry never reaches the WebSocket: the aggregator emits
+  one compact `network_activity` batch per 200 ms window (≤ ~5 msg/s) with
+  bounded item counts.
 - Event drawer is a bounded 800-event buffer.
 - React re-renders only on stats ticks (2 s) and event batches; per-node
   metric updates mutate cytoscape data directly.
-- Pulse overlay draws only active edges (capped 30 pulses + 80 recents).
+- Pulse overlay draws only active edges (capped 30 pulses + 140 particles +
+  80 recents); the rAF loop stops entirely when idle.
 
 ## Future AI-agent telemetry
 

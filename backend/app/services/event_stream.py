@@ -32,3 +32,22 @@ class EventStream:
                         q.put_nowait(ev)
                     except asyncio.QueueFull:
                         break
+
+    def publish_message(self, message: dict) -> None:
+        """Publish a complete protocol message (e.g. network_activity batch).
+
+        Same bounded-queue semantics as publish(); the ws endpoint routes
+        these directly instead of wrapping them in an events batch.
+        """
+        for q in list(self._subs):
+            try:
+                q.put_nowait(message)
+            except asyncio.QueueFull:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    q.put_nowait(message)
+                except asyncio.QueueFull:
+                    break

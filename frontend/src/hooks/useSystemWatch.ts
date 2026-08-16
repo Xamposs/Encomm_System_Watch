@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ConnectionStatus, Stats, SystemEvent } from '../types/system'
+import type {
+  ConnectionStatus,
+  Stats,
+  SystemEvent,
+  TelemetryInfo,
+} from '../types/system'
 import { WatchSocket } from '../services/ws'
 import type { GraphController } from '../graph/GraphController'
 
@@ -15,6 +20,7 @@ export function useSystemWatch() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [telemetry, setTelemetry] = useState<TelemetryInfo | null>(null)
   const eventsRef = useRef<SystemEvent[]>([])
   const controllerRef = useRef<GraphController | null>(null)
 
@@ -26,11 +32,22 @@ export function useSystemWatch() {
           setStats(msg.stats)
           setFeedTs(msg.ts)
           setReady(true)
+          if (msg.telemetry) {
+            setTelemetry(msg.telemetry)
+            controllerRef.current?.setTelemetry(msg.telemetry)
+          }
           controllerRef.current?.replaceAll(msg.nodes, msg.edges)
           break
         case 'events': {
           const list = msg.data
-          for (const ev of list) controllerRef.current?.applyEvent(ev)
+          for (const ev of list) {
+            controllerRef.current?.applyEvent(ev)
+            if (ev.event_type === 'TELEMETRY_CAPABILITY_CHANGED') {
+              const t = ev.metadata as unknown as TelemetryInfo
+              setTelemetry(t)
+              controllerRef.current?.setTelemetry(t)
+            }
+          }
           if (list.length) {
             eventsRef.current = [
               ...eventsRef.current.slice(-(EVENT_BUFFER_LIMIT - list.length)),
@@ -43,6 +60,13 @@ export function useSystemWatch() {
         case 'stats':
           setStats(msg.data)
           setFeedTs(msg.data.ts)
+          if (msg.data.telemetry) {
+            setTelemetry(msg.data.telemetry)
+            controllerRef.current?.setTelemetry(msg.data.telemetry)
+          }
+          break
+        case 'network_activity':
+          controllerRef.current?.applyActivity(msg.items, msg.nodes)
           break
       }
     }, setStatus)
@@ -77,6 +101,7 @@ export function useSystemWatch() {
     selectNode,
     drawerOpen,
     setDrawerOpen,
+    telemetry,
     controllerRef,
   }
 }

@@ -1,18 +1,29 @@
-import type { ConnectionStatus, Stats } from '../types/system'
+import type { ConnectionStatus, Stats, TelemetryInfo } from '../types/system'
+import { fmtBps } from '../graph/GraphController'
 
 interface Props {
   status: ConnectionStatus
   mode: 'live' | 'demo'
   stats: Stats | null
   feedTs: number | null
+  telemetry: TelemetryInfo | null
 }
 
-export function Header({ status, mode, stats, feedTs }: Props) {
+function telemetryLabel(t: TelemetryInfo | null): { text: string; cls: string } {
+  if (!t || !t.enabled) return { text: 'TRAFFIC: DISABLED', cls: 'tel-off' }
+  if (t.level === 'TIER2') return { text: 'TRAFFIC: PER-EDGE', cls: 'tel-t2' }
+  return { text: 'TRAFFIC: SOCKET EVENTS', cls: 'tel-t0' }
+}
+
+export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
   const feed = feedTs
     ? new Date(feedTs * 1000).toLocaleTimeString('en-GB', { hour12: false })
     : '--:--:--'
   const connLabel =
     status === 'live' ? '● LIVE' : status === 'connecting' ? '● CONNECTING' : '● DISCONNECTED'
+
+  const net = stats?.net
+  const tel = telemetryLabel(telemetry)
 
   return (
     <header className="header">
@@ -47,6 +58,26 @@ export function Header({ status, mode, stats, feedTs }: Props) {
           <div className="stat-line">
             FEED <span className="stat-num">{feed}</span>
           </div>
+        </div>
+        {/* bandwidth: only when real numbers exist; the source is explicit */}
+        {net && (
+          <div className="stat-block net" title={
+            net.source === 'CAPTURED'
+              ? 'Sum of captured per-connection telemetry (adapter totals in parentheses)'
+              : 'System adapter totals (sum of all physical interfaces)'
+          }>
+            <div className="stat-line">
+              NET <span className="stat-num">↓ {fmtBps(net.down_bps)}</span>
+            </div>
+            <div className="stat-line">
+              <span className="stat-num">↑ {fmtBps(net.up_bps)}</span>{' '}
+              <span className="net-source">{net.source === 'CAPTURED' ? 'CAPTURED' : 'ADAPTER'}</span>
+            </div>
+          </div>
+        )}
+        <div className={`tel-chip ${tel.cls}`} title={telemetry?.detail ?? ''}>
+          {tel.text}
+          {telemetry?.elevation_required && <span className="tel-elev"> · ELEVATION REQUIRED</span>}
         </div>
       </div>
     </header>

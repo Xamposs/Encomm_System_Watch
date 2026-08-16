@@ -56,6 +56,19 @@ def cfg() -> Settings:
 
 
 @pytest.fixture
+def client():
+    """TestClient WITHOUT lifespan (no collector loops, no telemetry probe).
+
+    Use only for pure route tests; state is the module default.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    return TestClient(app)
+
+
+@pytest.fixture
 def small_cfg() -> Settings:
     """Config with tiny node caps to exercise aggregation paths."""
     return Settings(max_external_nodes=2, max_listen_nodes=2, max_loc_nodes=2)
