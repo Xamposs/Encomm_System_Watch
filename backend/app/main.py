@@ -128,6 +128,11 @@ def _init_telemetry() -> None:
     else:
         telemetry_provider.start()
         cap = telemetry_provider.capability()
+        # closed connections must leave the provider's TCB correlation map
+        # as soon as the psutil topology sees them go (ETW removal events
+        # arrive 10-35 s late and the kernel can recycle the Tcb handle,
+        # which would misattribute the next connection's early bytes).
+        aggregator.set_tuples_closed_callback(telemetry_provider.drop_tcb_tuples)
     aggregator.set_capability(cap)
     _state["telemetry"] = cap.to_dict()
     if telemetry_provider is not None:
@@ -326,7 +331,7 @@ async def lifespan(_: FastAPI):
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.2", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.3", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

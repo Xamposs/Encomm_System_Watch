@@ -282,6 +282,7 @@ class EtwTcpipProvider(NetworkActivityProvider):
             "events_received": 0, "events_dropped": 0, "events_drained": 0,
             "tcb_mappings_created": 0, "tcb_mappings_removed": 0,
             "tcb_map_size": 0, "tcb_lookup_hits": 0, "tcb_lookup_misses": 0,
+            "tcb_drops_from_topology": 0,
         }
 
     # ------------------------------------------------------------ lifecycle
@@ -588,6 +589,34 @@ class EtwTcpipProvider(NetworkActivityProvider):
             self._counters["events_drained"] += len(out)
             self._counters["tcb_map_size"] = len(self._tcb_map)
         return out
+
+    def drop_tcb_tuples(self, tuples) -> None:
+        """Drop TCB entries whose connection left the topology.
+
+        Called by the aggregator ~1-2 s after a connection disappears from
+        the psutil snapshot. Without this, a CLOSED connection's Tcb entry
+        lingers (removal events arrive 10-35 s late on this Windows build)
+        and the kernel's TCB allocator can REUSE the same handle value for
+        the next connection: its early byte events would be attributed to
+        the dead connection (misattribution -> unattributed events).
+
+        Matching uses the 4-tuple projection (pid, local_port, remote_ip,
+        remote_port) because ETW may hold the same connection under both a
+        wildcard local form (0.0.0.0) and the resolved-IP form; the
+        projection covers both while never matching two distinct live
+        connections (a (pid, lport, raddr, rport) tuple is unique).
+        """
+        if not tuples:
+            return
+        targets = {(t[0], t[2], t[3], t[4]) for t in tuples}
+        with self._lock:
+            before = len(self._tcb_map)
+            for key in [k for k, e in self._tcb_map.items()
+                        if (e.pid, e.local_port, e.remote_ip, e.remote_port) in targets]:
+                del self._tcb_map[key]
+                self._counters["tcb_mappings_removed"] += 1
+            if before != len(self._tcb_map):
+                self._counters["tcb_drops_from_topology"] += 1
 
     def queue_depth(self) -> int:
         with self._lock:

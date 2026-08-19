@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..config import Settings
 from ..models.entities import Event, Snapshot, TopologyResult
@@ -78,6 +78,23 @@ class ActivityAggregator:
             "wildcard_lookup_ambiguous": 0,
         }
         self._last_batch: dict = {}
+        # closed-connection notification: tuples absent from the topology
+        # for 2+ consecutive set_topology calls are reported to the provider
+        # (which drops their TCB entries promptly, closing the stale-entry
+        # reuse race). De-bounced so a single flaky psutil tick never kills
+        # the identity of a still-open connection.
+        self._absent_tuples: dict[tuple, int] = {}
+        self._on_tuples_closed: Optional[Callable[[set], None]] = None
+
+    def set_tuples_closed_callback(self, fn: Optional[Callable[[set], None]]) -> None:
+        """Register a receiver for connection tuples that left the topology.
+
+        The provider uses this to drop stale TCB correlation entries
+        immediately instead of waiting for (10-35 s delayed) ETW removal
+        events — otherwise a recycled kernel Tcb handle would misattribute
+        the next connection's early bytes to the dead one.
+        """
+        self._on_tuples_closed = fn
 
     # ------------------------------------------------------------ topology
 
@@ -132,6 +149,27 @@ class ActivityAggregator:
             for eid, st in self._edges.items():
                 if eid in present:
                     st.last_seen = now
+        # closed-connection detection (de-bounced 2 ticks): tuples that were
+        # in the topology and are now gone are reported so the provider can
+        # drop their TCB entries before the kernel recycles the handle.
+        current = set(tuple_map)
+        closed: set = set()
+        for key in list(self._absent_tuples):
+            if key in current:
+                del self._absent_tuples[key]
+            else:
+                self._absent_tuples[key] += 1
+                if self._absent_tuples[key] >= 2:
+                    closed.add(key)
+        for key in current:
+            self._absent_tuples.setdefault(key, 0)
+        for key in closed:
+            del self._absent_tuples[key]
+        if closed and self._on_tuples_closed is not None:
+            try:
+                self._on_tuples_closed(closed)
+            except Exception:  # noqa: BLE001 — closed-tuple cleanup must never break collection
+                pass
 
     def set_capability(self, capability: Capability) -> None:
         self._capability = capability

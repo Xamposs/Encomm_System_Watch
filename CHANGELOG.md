@@ -2,6 +2,53 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.2.3] — 2026-08-19
+
+Final real-ETW runtime validation checkpoint (Phase 19 stays COMPLETE — every
+gate re-proven live, plus one real defect fixed).
+
+### Fixed
+
+- **TCB stale-entry reuse race (real ETW defect found during final
+  validation)** — a closed connection's Tcb correlation entry lingered until
+  the 10-35 s delayed ETW removal events arrived; the kernel's TCB allocator
+  can recycle the same handle value for the next connection, so its early
+  byte events were attributed to the DEAD connection (measured: 18,181
+  unattributed events over one back-to-back harness pair). Fix: the
+  aggregator now tracks connection tuples that leave the psutil topology
+  (de-bounced 2 ticks) and calls
+  `EtwTcpipProvider.drop_tcb_tuples()` — matching on the 4-tuple projection
+  `(pid, local_port, remote_ip, remote_port)` so wildcard-local forms are
+  covered too — removing the stale entries within ~1-2 s of close. New
+  diagnostic counter: `tcb_drops_from_topology`. Regression tests:
+  `test_drop_tcb_tuples_removes_closed_connection`,
+  `test_drop_tcb_tuples_covers_wildcard_local_form`,
+  `test_drop_tcb_tuples_ignores_unrelated_entries`.
+- **Acceptance harness timing (Test R/S/T could not pass under real ETW)** —
+  `tools/acceptance.mjs` now implements the documented real-ETW timing
+  rules: Test R harness `--watch 8` -> `35` (identity events land 10-35 s
+  late, so the harness's OWN bytes now attribute mid-window), Test S harness
+  `--watch 15` -> `35`, S10 (harness edge in topology) polled EARLY right
+  after spawn (the edge dies ~1-2 s after close), S8/S9 use MAX-sampled
+  `last_batch` per direction (single ~200 ms samples are racy, same rule as
+  `verify_tier2.ps1`), T6 polls until node rates clear, and the T7 wake
+  harness exit-listener is attached before the poll (it previously hung
+  forever when the 3 s harness exited first).
+
+### Verified (live, elevated, real Microsoft-Windows-TCPIP)
+
+- `tools/verify_tier2.ps1`: **10/10 PASS**.
+- Full acceptance: **76/76 PASS** (Tests A-Q, R, S, T) with REAL DATA
+  particles on real edges and real directional bytes (Tests R3, S6-S10, T1-T7).
+- Deterministic harness PROCESS↔PROCESS edge (port 19736) received
+  **445,402,992 B fwd / 90,046,504 B rev** across 207 real ETW
+  network_activity batches — correct PIDs/ports, no synthetic data.
+- Backend: **101 tests passed / 0 failed**.
+- Frontend: `npm run typecheck` PASS, `npm run build` PASS.
+- Wildcard local-IP fallback: regression-tested (unit) but **not observed in
+  this runtime window** (0 wildcard hits / 5,270 misses / 0 ambiguous across
+  all windows) — the ambiguity-safe rule was never weakened to inflate hits.
+
 ## [0.2.2] — 2026-08-17
 
 Real Windows ETW per-edge traffic correlation checkpoint (Phase 19 COMPLETE).

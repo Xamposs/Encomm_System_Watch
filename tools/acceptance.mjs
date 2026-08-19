@@ -533,7 +533,7 @@ async function main() {
   // ---- Test R: real localhost traffic ------------------------------------
   console.log('\n[Test R] Live localhost traffic (deterministic harness)')
   let harnessExited = false
-  const harness = spawn('python', ['tools/network_activity_test/run.py', '--port', '19734', '--watch', '8'], {
+  const harness = spawn('python', ['tools/network_activity_test/run.py', '--port', '19734', '--watch', '35'], {
     cwd: join(__dirname, '..'), stdio: 'ignore',
   })
   harness.on('exit', () => { harnessExited = true })
@@ -575,7 +575,10 @@ async function main() {
   const realEtwR = telR.level === 'TIER2' && !/SYNTHETIC/i.test(telR.source || '')
   if (realEtwR) {
     let actReal = actDuring
-    for (let i = 0; i < 20 && actReal === 0; i++) {
+    // identity events land 10-35 s late (see skill reference
+    // real-etw-verification-timing.md), so the harness's OWN bytes can
+    // attribute mid-window: poll up to ~30 s (the harness runs 35 s).
+    for (let i = 0; i < 60 && actReal === 0; i++) {
       await sleep(500)
       actReal = await cdp.eval(EX.actEdges)
     }
@@ -585,7 +588,7 @@ async function main() {
     check('R3 no fabricated per-edge activity (truthfulness)', actDuring === 0,
       `actEdges=${actDuring}`)
   }
-  for (let i = 0; i < 60 && !harnessExited; i++) await sleep(500)
+  for (let i = 0; i < 140 && !harnessExited; i++) await sleep(500)
   check('R6 harness exited cleanly', harnessExited === true)
   let pairAfter = pairSeen
   for (let i = 0; i < 15 && pairAfter > 0; i++) {
@@ -621,10 +624,19 @@ async function main() {
     const baseRecv = dbg0?.provider?.events_received || 0
     const baseMapped = dbg0?.aggregator?.events_mapped_to_edges || 0
     let harnessSExited = false
-    const harnessS = spawn('python', ['tools/network_activity_test/run.py', '--port', '19735', '--watch', '15'], {
+    const harnessS = spawn('python', ['tools/network_activity_test/run.py', '--port', '19735', '--watch', '35'], {
       cwd: join(__dirname, '..'), stdio: 'ignore',
     })
     harnessS.on('exit', () => { harnessSExited = true })
+    // S10 must be checked EARLY: the topology edge dies ~1-2 s after the
+    // harness exits (see skill reference real-etw-verification-timing.md),
+    // so it is polled right after spawn while the 35 s harness runs.
+    let harnessEdgeS = 0
+    for (let i = 0; i < 40 && harnessEdgeS === 0; i++) {
+      await sleep(500)
+      harnessEdgeS = await cdp.eval(EX.harnessEdge(19735))
+    }
+    check('S10 harness edge present during traffic', harnessEdgeS >= 1, `edges=${harnessEdgeS}`)
     // poll the debug counters until FRESH events crossed the whole chain
     let dbg = null
     for (let i = 0; i < 50; i++) {
@@ -658,26 +670,32 @@ async function main() {
     check('S7 DATA particles moving in overlay', (ov?.particles || 0) > 0,
       `particles=${ov?.particles}`)
     const lb0 = dbg?.aggregator?.last_batch || {}
-    // wait for a batch that actually carried directional bytes (edge-mapped)
+    // last_batch is a ~200 ms flush window overwritten by node-only
+    // flushes, so a single sample is racy: track the BEST observation per
+    // direction across the poll window (same rule as verify_tier2.ps1).
     let lb = lb0
-    for (let i = 0; i < 20 && !((lb?.fwd_bytes || 0) > 0 || (lb?.rev_bytes || 0) > 0); i++) {
+    let maxFwd = lb?.fwd_bytes || 0
+    let maxRev = lb?.rev_bytes || 0
+    for (let i = 0; i < 40 && !(maxFwd > 0 && maxRev > 0); i++) {
       await sleep(500)
       try {
         const d2 = await (await fetch(`${API}/api/telemetry/debug`)).json()
         const cand = d2?.aggregator?.last_batch || {}
-        if (cand && typeof cand.fwd_bytes === 'number') lb = cand
+        if (cand && typeof cand.fwd_bytes === 'number') {
+          lb = cand
+          if ((cand.fwd_bytes || 0) > maxFwd) maxFwd = cand.fwd_bytes
+          if ((cand.rev_bytes || 0) > maxRev) maxRev = cand.rev_bytes
+        }
       } catch { /* backend busy */ }
     }
-    check('S8 directional bytes fwd > 0', (lb?.fwd_bytes || 0) > 0, `fwd=${lb?.fwd_bytes}`)
-    check('S9 directional bytes rev > 0', (lb?.rev_bytes || 0) > 0, `rev=${lb?.rev_bytes}`)
-    const harnessEdgeS = await cdp.eval(EX.harnessEdge(19735))
-    check('S10 harness edge present during traffic', harnessEdgeS >= 1, `edges=${harnessEdgeS}`)
+    check('S8 directional bytes fwd > 0', maxFwd > 0, `max_fwd=${maxFwd}`)
+    check('S9 directional bytes rev > 0', maxRev > 0, `max_rev=${maxRev}`)
     const shots = await cdp.eval(`(() => {
       const ov = window.__esw_controller.overlayStats()
       return JSON.stringify(ov)
     })()`)
     console.log(`  info  overlay at traffic peak: ${shots}`)
-    for (let i = 0; i < 60 && !harnessSExited; i++) await sleep(500)
+    for (let i = 0; i < 140 && !harnessSExited; i++) await sleep(500)
     check('S11 harness exited cleanly', harnessSExited === true)
   } else {
     console.log('  SKIP  S0b–S11 (backend not TIER2 — start with ESW_TELEMETRY_PROVIDER=synthetic or elevated ETW)')
@@ -698,20 +716,21 @@ async function main() {
     let ovT = null
     let actT = -1
     let ctlT = -1
+    let staleT = -1
     for (let i = 0; i < 40; i++) {
       await sleep(500)
       ovT = JSON.parse(await cdp.eval(EX.overlayStats))
       actT = await cdp.eval(EX.actEdges)
       ctlT = await cdp.eval(EX.controllerEdgeActivity)
+      staleT = await cdp.eval(EX.staleRateNodes)
       const idle = ovT && ovT.activity === 0 && ovT.particles === 0 && ovT.running === false
-      if (idle && actT === 0 && ctlT === 0) break
+      if (idle && actT === 0 && ctlT === 0 && staleT === 0) break
     }
     check('T1 overlay activity map pruned by time', ovT?.activity === 0, `activity=${ovT?.activity}`)
     check('T2 no particles remain', ovT?.particles === 0, `particles=${ovT?.particles}`)
     check('T4 actLow/actMed/actHigh cleared without new batches', actT === 0, `actEdges=${actT}`)
     check('T5 controller edgeActivity map cleared', ctlT === 0, `edgeActivity=${ctlT}`)
-    const staleNodes = await cdp.eval(EX.staleRateNodes)
-    check('T6 stale node net rates cleared', staleNodes === 0, `nodes=${staleNodes}`)
+    check('T6 stale node net rates cleared', staleT === 0, `nodes=${staleT}`)
     // rAF stop mechanism, deterministic: the terminal idle state is forced
     // exactly as time-decay eventually produces it; the next frames must
     // cancel the loop.
@@ -728,12 +747,19 @@ async function main() {
     const wakeHarness = spawn('python', ['tools/network_activity_test/run.py', '--port', '19735', '--watch', '3'], {
       cwd: join(__dirname, '..'), stdio: 'ignore',
     })
+    // the wake harness is --watch 3; the exit listener must be attached
+    // BEFORE the poll loop (or the 'exit' event fires first and the await
+    // below would hang forever) — attach it immediately after spawn
+    const wakeExited = new Promise((res) => {
+      if (wakeHarness.exitCode !== null) return res()
+      wakeHarness.on('exit', res)
+    })
     for (let i = 0; i < 30; i++) {
       await sleep(500)
       wakeAct = await cdp.eval(EX.actEdges)
       if (wakeAct > 0) break
     }
-    await new Promise((res) => wakeHarness.on('exit', res))
+    await wakeExited
     const dbgAfter = await (await fetch(`${API}/api/telemetry/debug`)).json()
     const batchesAfter = dbgAfter?.aggregator?.activity_batches_emitted || 0
     check('T7 idle state wakes on new traffic', wakeAct > 0 || batchesAfter > batchesBefore,

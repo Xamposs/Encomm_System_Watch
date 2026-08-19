@@ -365,3 +365,54 @@ def test_readiness_transitions():
     cap = prov.capability()
     assert cap.level == "TIER0" and cap.readiness == "DEGRADED"
     assert "ETW session ended" in cap.detail
+
+
+# ------------------------------------- topology-driven stale-entry cleanup
+
+def test_drop_tcb_tuples_removes_closed_connection():
+    prov = _setup_map(
+        _conn("TCPCONNECTTCBCOMPLETE", 0xAA, 1234, "127.0.0.1", 19736,
+              "127.0.0.1", 51900),
+        _conn("TCPCONNECTTCBCOMPLETE", 0xBB, 9999, "127.0.0.1", 19736,
+              "127.0.0.1", 51901),
+    )
+    assert prov.counters()["tcb_map_size"] == 2
+    # the aggregator reports the closed connection's 5-tuple (pid, lip,
+    # lport, rip, rport); matching uses the 4-tuple projection so the
+    # wildcard local form (0.0.0.0) of the same connection is covered too
+    prov.drop_tcb_tuples({(1234, "127.0.0.1", 19736, "127.0.0.1", 51900)})
+    assert prov.counters()["tcb_map_size"] == 1
+    assert prov.counters()["tcb_drops_from_topology"] == 1
+    # the other connection is untouched
+    assert prov._tcb_map[_normalize_tcb(_tcb(0xBB))].pid == 9999
+    # data events for the dropped TCB now MISS instead of misattributing
+    prov._on_event(_xfer("TCPDATATRANSFERSEND", 0xAA, 4096))
+    assert prov.drain() == []
+    cnt = prov.counters()
+    assert cnt["tcb_lookup_misses"] == 1
+
+
+def test_drop_tcb_tuples_covers_wildcard_local_form():
+    prov = _setup_map(
+        # ETW learned the same connection under the wildcard local form
+        _conn("TCPCONNECTTCBCOMPLETE", 0xAA, 1234, "0.0.0.0", 51000,
+              "104.18.22.44", 443),
+    )
+    assert prov.counters()["tcb_map_size"] == 1
+    # the psutil topology reports the resolved local IP
+    prov.drop_tcb_tuples({(1234, "192.168.1.5", 51000, "104.18.22.44", 443)})
+    assert prov.counters()["tcb_map_size"] == 0
+
+
+def test_drop_tcb_tuples_ignores_unrelated_entries():
+    prov = _setup_map(
+        _conn("TCPCONNECTTCBCOMPLETE", 0xAA, 1234, "127.0.0.1", 19736,
+              "127.0.0.1", 51900),
+    )
+    prov.drop_tcb_tuples({
+        (8888, "127.0.0.1", 19736, "127.0.0.1", 51900),   # wrong pid
+        (1234, "127.0.0.1", 99999, "127.0.0.1", 51900),  # wrong port
+        (1234, "127.0.0.1", 19736, "10.0.0.9", 51900),   # wrong remote
+    })
+    assert prov.counters()["tcb_map_size"] == 1
+    assert prov.counters()["tcb_drops_from_topology"] == 0

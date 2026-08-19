@@ -115,6 +115,13 @@ class NetworkActivityProvider:
         """Current buffered-event count (diagnostics)."""
         return 0
 
+    def drop_tcb_tuples(self, tuples) -> None:
+        """Drop correlation entries for connection tuples that left the
+        topology (called by the aggregator when the psutil snapshot no
+        longer contains them). Base no-op: only TCB-correlating providers
+        hold such state."""
+        return None
+
     def counters(self) -> dict:
         """Read-only diagnostic counters (diagnostics)."""
         return {}
