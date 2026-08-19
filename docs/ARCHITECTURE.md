@@ -24,29 +24,35 @@ FRONTEND STATE  (React hook + imperative graph controller)
 CYTOSCAPE GRAPH  (canvas pulse overlay on top)
 ```
 
-Network activity (v0.2) plugs into the same pipeline — the v0.2.1 runtime
-chain is:
+Network activity (v0.2) plugs into the same pipeline — the v0.2.2 runtime
+chain with REAL ETW correlation is:
 
 ```
-WINDOWS NETWORK ACTIVITY SOURCE   (ETW Microsoft-Windows-TCPIP, if permitted)
+Microsoft-Windows-TCPIP                 (REAL ETW provider, elevated only)
         ↓
-EtwTcpipProvider ETW callback     (parse + normalize + append — lightweight only)
+Connection identity events              (TcpConnectionRundown / TcpConnectTcbComplete /
+        ↓                               TcpAcceptListenerComplete / TcpConnectTcbProceeding)
+TCB CORRELATION CACHE                   (Tcb -> pid + local/remote 4-tuple; bounded: TTL 5 min,
+        ↓                               max 8192 entries, explicit removal on close/abort/RST)
+TcpDataTransferSend / TcpDataTransferReceive   (modern manifest: Tcb + byte count only)
         ↓
-PROVIDER BOUNDED QUEUE            (20 000 events; overflow drops are counted)
+TCB lookup                              (hits/misses counted truthfully)
         ↓
-provider.drain()                  (the runtime loop's telemetry tick)
+PID + real 4-tuple + direction + bytes  -> NetworkActivityEvent
         ↓
-ActivityAggregator.record_many()  (batch ingestion, ONE lock per window)
+PROVIDER BOUNDED QUEUE                  (20 000 events; overflow drops are counted)
         ↓
-ACTIVITY AGGREGATOR               (200 ms windows, edge mapping, rates, bursts)
+provider.drain()                        (the runtime loop's telemetry tick)
         ↓
-TOPOLOGY EDGE MAPPING             (tuple → edge evidence, rebuilt every tick)
+ActivityAggregator.record_many()        (batch ingestion, ONE lock per window)
         ↓
-WEBSOCKET ACTIVITY BATCH          (network_activity, ≤ ~5 msg/s)
+ACTIVITY AGGREGATOR                     (200 ms windows, edge mapping, rates, bursts)
         ↓
-GraphController                   (per-edge activity state + decay scheduler)
+WEBSOCKET ACTIVITY BATCH                (network_activity, ≤ ~5 msg/s)
         ↓
-EdgePulseOverlay                  (directional particles, rAF, idle-stops)
+GraphController                         (per-edge activity state + decay scheduler)
+        ↓
+EdgePulseOverlay                        (REAL DATA particles, rAF, idle-stops)
 ```
 
 The provider → aggregator wiring (drain → record_many) lives in
@@ -54,6 +60,17 @@ The provider → aggregator wiring (drain → record_many) lives in
 v0.2.0 missing-wiring bug: previously the ETW provider buffered events
 into its internal queue but nothing ever drained it, so real byte events
 never reached the aggregator or the WebSocket.
+
+Modern Windows 11 (tcpip.sys 10.0.19041) delivers transfer events
+(`TcpDataTransferSend`/`Receive`) with ONLY a Tcb handle and byte counts —
+no pid, no addresses — so connection identity is learned from separate
+lifecycle events into the TCB correlation cache (including the
+`TcpConnectionRundown` snapshot at session start). The legacy manifest
+(`SENDIPV4/RECEIPV4/...`) is still parsed for older Windows; task names
+are compared case-insensitively. UDP is self-contained in the modern
+manifest (`UdpEndpointSendMessages`/`Receive` carry pid + sockaddrs +
+bytes) and is attributed directly. Empirically, identity events arrive in
+delayed batches (up to ~35 s), so verification windows must outlast them.
 
 Separate LOGICAL-TIER2 validation path (test-only, opt-in, never default):
 

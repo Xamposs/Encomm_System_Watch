@@ -11,7 +11,12 @@ interface Props {
 
 function telemetryLabel(t: TelemetryInfo | null): { text: string; cls: string } {
   if (!t || !t.enabled) return { text: 'TRAFFIC: DISABLED', cls: 'tel-off' }
-  if (t.level === 'TIER2') return { text: 'TRAFFIC: PER-EDGE', cls: 'tel-t2' }
+  if (t.level === 'TIER2') {
+    // A started ETW session is not the same as usable per-edge bytes.
+    if (t.readiness === 'DEGRADED') return { text: 'TRAFFIC: DEGRADED', cls: 'tel-t0' }
+    if (t.readiness === 'INITIALIZING') return { text: 'TRAFFIC: PER-EDGE (STARTING)', cls: 'tel-t2' }
+    return { text: 'TRAFFIC: PER-EDGE', cls: 'tel-t2' }
+  }
   return { text: 'TRAFFIC: SOCKET EVENTS', cls: 'tel-t0' }
 }
 

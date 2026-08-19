@@ -94,16 +94,31 @@ $harness = Start-Process -FilePath $Py -ArgumentList @(
     -WindowStyle Hidden -PassThru
 
 # ------------------------------------------------------------ counters
-Start-Sleep -Seconds 4
-$dbg = Get-Json "$Api/api/telemetry/debug"
+# last_batch is a point-in-time ~200 ms flush window and is overwritten by
+# every node-only flush, so directional edge bytes are sampled repeatedly
+# across the harness window and the BEST observation is checked.
+Start-Sleep -Seconds 2
+$maxFwd = 0
+$maxRev = 0
+$dbg = $null
+$deadline = (Get-Date).AddSeconds(8)
+while ((Get-Date) -lt $deadline) {
+    $dbg = Get-Json "$Api/api/telemetry/debug"
+    if ($dbg.aggregator.last_batch.fwd_bytes -gt $maxFwd) {
+        $maxFwd = $dbg.aggregator.last_batch.fwd_bytes
+    }
+    if ($dbg.aggregator.last_batch.rev_bytes -gt $maxRev) {
+        $maxRev = $dbg.aggregator.last_batch.rev_bytes
+    }
+    Start-Sleep -Milliseconds 250
+}
 Check 'provider received events' ($dbg.provider.events_received -gt 0) "received=$($dbg.provider.events_received)"
 Check 'provider drained events' ($dbg.provider.events_drained -gt 0) "drained=$($dbg.provider.events_drained)"
 Check 'aggregator recorded events' ($dbg.aggregator.events_recorded -gt 0) "recorded=$($dbg.aggregator.events_recorded)"
 Check 'events mapped to edges' ($dbg.aggregator.events_mapped_to_edges -gt 0) "mapped=$($dbg.aggregator.events_mapped_to_edges)"
 Check 'activity batches emitted' ($dbg.aggregator.activity_batches_emitted -gt 0) "batches=$($dbg.aggregator.activity_batches_emitted)"
-$lb = $dbg.aggregator.last_batch
-Check 'directional bytes fwd > 0' ($lb.fwd_bytes -gt 0) "fwd=$($lb.fwd_bytes)"
-Check 'directional bytes rev > 0' ($lb.rev_bytes -gt 0) "rev=$($lb.rev_bytes)"
+Check 'directional bytes fwd > 0' ($maxFwd -gt 0) "max_fwd=$maxFwd"
+Check 'directional bytes rev > 0' ($maxRev -gt 0) "max_rev=$maxRev"
 Check 'queue bounded (depth)' ($dbg.provider.queue_depth -lt 20000) "depth=$($dbg.provider.queue_depth)"
 
 if (-not $harness.HasExited) {

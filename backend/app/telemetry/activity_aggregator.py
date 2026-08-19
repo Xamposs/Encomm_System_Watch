@@ -14,6 +14,11 @@ Raw per-packet events can arrive at thousands/sec. The aggregator:
 Truthfulness rules:
   - events that cannot be mapped to a known edge are attributed to the
     owning process when possible (node halo), never to a random edge;
+  - ETW reports outbound local addresses as wildcards (0.0.0.0 / :: /
+    empty) while psutil sees the resolved source IP. A wildcard fallback
+    keyed by (pid, local_port, remote_ip, remote_port) is used ONLY when
+    it identifies exactly ONE topology edge; ambiguous identities are
+    never guessed (counted as ``wildcard_lookup_ambiguous``);
   - events with no known owner are counted only by the adapter totals;
   - direction is only claimed when the provider exposed it.
 """
@@ -47,6 +52,10 @@ class ActivityAggregator:
         self._pending: list[NetworkActivityEvent] = []
         # (pid, lip, lport, rip, rport) -> (edge_id, owner_is_source, kind)
         self._tuple_map: dict[tuple, tuple[str, bool, str]] = {}
+        # (pid, lport, rip, rport) -> [(edge_id, owner_is_source, kind), ...]
+        # wildcard-local fallback candidates. Initialized empty so flush()
+        # is safe before the first set_topology() (fresh startup).
+        self._wildcard_map: dict[tuple, list[tuple[str, bool, str]]] = {}
         self._pid_map: dict[int, str] = {}          # pid -> stable process id
         self._labels: dict[str, tuple[str, str]] = {}  # edge_id -> (src, tgt) labels
         self._edge_kinds: dict[str, str] = {}       # edge_id -> LOCALHOST|EXTERNAL|LISTEN
@@ -63,6 +72,10 @@ class ActivityAggregator:
             "events_mapped_to_nodes": 0,
             "events_unattributed": 0,
             "activity_batches_emitted": 0,
+            "exact_lookup_hits": 0,
+            "wildcard_lookup_hits": 0,
+            "wildcard_lookup_misses": 0,
+            "wildcard_lookup_ambiguous": 0,
         }
         self._last_batch: dict = {}
 
@@ -75,6 +88,12 @@ class ActivityAggregator:
             if p.pid is not None:
                 pid_map[p.pid] = sid
         tuple_map: dict[tuple, tuple[str, bool, str]] = {}
+        # ETW reports the local address of outbound client sockets as the
+        # wildcard (0.0.0.0 / ::) while psutil reports the resolved source
+        # IP — index a fallback keyed by (pid, local_port, remote_ip,
+        # remote_port) holding ALL candidate edges, so flush() can use it
+        # only when it identifies exactly one edge (never guess).
+        wildcard_map: dict[tuple, list[tuple[str, bool, str]]] = {}
         labels: dict[str, tuple[str, str]] = {}
         edge_kinds: dict[str, str] = {}
 
@@ -94,11 +113,18 @@ class ActivityAggregator:
             owner_is_src = owner is not None and owner == edge.source
             key = (c.pid, c.local_ip, c.local_port, c.remote_ip, c.remote_port)
             tuple_map[key] = (eid, owner_is_src, edge.kind)
+            wk = (c.pid, c.local_port, c.remote_ip, c.remote_port)
+            candidates = wildcard_map.setdefault(wk, [])
+            cand = (eid, owner_is_src, edge.kind)
+            if cand not in candidates:
+                # the same edge indexed twice is NOT ambiguity
+                candidates.append(cand)
             labels[eid] = (_lbl(edge.source), _lbl(edge.target))
             edge_kinds[eid] = edge.kind
         with self._lock:
             self._pid_map = pid_map
             self._tuple_map = tuple_map
+            self._wildcard_map = wildcard_map
             self._labels = labels
             self._edge_kinds = edge_kinds
             now = time.time()
@@ -145,6 +171,7 @@ class ActivityAggregator:
             pending, self._pending = self._pending, []
             pid_map = dict(self._pid_map)
             tuple_map = dict(self._tuple_map)
+            wildcard_map = dict(self._wildcard_map)
             labels = dict(self._labels)
         now = time.time()
         window_s = max(0.05, now - self._last_flush)
@@ -155,9 +182,31 @@ class ActivityAggregator:
         mapped_edges = 0
         mapped_nodes = 0
         unattributed = 0
+        exact_hits = 0
+        wildcard_hits = 0
+        wildcard_misses = 0
+        wildcard_ambiguous = 0
         for ev in pending:
             key = (ev.pid, ev.local_ip, ev.local_port, ev.remote_ip, ev.remote_port)
             hit = tuple_map.get(key)
+            if hit is not None:
+                exact_hits += 1
+            elif ev.local_ip in ("0.0.0.0", "::", ""):
+                # ETW reports outbound client sockets with a wildcard local
+                # address while psutil reports the resolved source IP, so
+                # the exact key above misses. Fall back to (pid,
+                # local_port, remote_ip, remote_port) ONLY when it
+                # identifies exactly one topology edge — never guess
+                # between candidates.
+                candidates = wildcard_map.get(
+                    (ev.pid, ev.local_port, ev.remote_ip, ev.remote_port))
+                if candidates is None:
+                    wildcard_misses += 1
+                elif len(candidates) == 1:
+                    hit = candidates[0]
+                    wildcard_hits += 1
+                else:
+                    wildcard_ambiguous += 1
             if hit is not None:
                 mapped_edges += 1
                 eid, owner_is_src, _kind = hit
@@ -266,6 +315,13 @@ class ActivityAggregator:
                 self._counters["events_mapped_to_edges"] += mapped_edges
                 self._counters["events_mapped_to_nodes"] += mapped_nodes
                 self._counters["events_unattributed"] += unattributed
+        # lookup diagnostics are unconditional: misses/ambiguity count even
+        # in windows that produced no items (e.g. unattributed-only flushes)
+        with self._lock:
+            self._counters["exact_lookup_hits"] += exact_hits
+            self._counters["wildcard_lookup_hits"] += wildcard_hits
+            self._counters["wildcard_lookup_misses"] += wildcard_misses
+            self._counters["wildcard_lookup_ambiguous"] += wildcard_ambiguous
         return items, burst_events, node_items
 
     def _prune(self, now: float) -> None:

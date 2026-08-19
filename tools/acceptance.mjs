@@ -567,7 +567,24 @@ async function main() {
   const harnessRows = await cdp.eval(`[...document.querySelectorAll('.ev-desc')].filter(d => d.textContent.includes('19734')).length`)
   check('R2b harness-specific events visible in drawer', harnessRows >= 1, `rows=${harnessRows}`)
   const actDuring = await cdp.eval(EX.actEdges)
-  check('R3 no fabricated per-edge activity (truthfulness at TIER0)', actDuring === 0, `actEdges=${actDuring}`)
+  // truthfulness is capability-relative: TIER0 cannot show per-edge bytes
+  // (fabricated activity would be a lie); a REAL ETW backend MUST show the
+  // harness's real bytes; synthetic only fabricates for its own target port
+  // (19735), so the 19734 harness stays silent there too.
+  const telR = await (await fetch(`${API}/api/telemetry`)).json()
+  const realEtwR = telR.level === 'TIER2' && !/SYNTHETIC/i.test(telR.source || '')
+  if (realEtwR) {
+    let actReal = actDuring
+    for (let i = 0; i < 20 && actReal === 0; i++) {
+      await sleep(500)
+      actReal = await cdp.eval(EX.actEdges)
+    }
+    check('R3 real per-edge activity visible on harness edge', actReal > 0,
+      `actEdges=${actReal}`)
+  } else {
+    check('R3 no fabricated per-edge activity (truthfulness)', actDuring === 0,
+      `actEdges=${actDuring}`)
+  }
   for (let i = 0; i < 60 && !harnessExited; i++) await sleep(500)
   check('R6 harness exited cleanly', harnessExited === true)
   let pairAfter = pairSeen
@@ -667,11 +684,17 @@ async function main() {
   }
 
   // ---- Test T: activity decay without further backend batches ------------
-  // After the harness stops, NO network_activity message ever arrives again.
-  // The frontend must decay purely by time: ACTIVE -> RECENT -> IDLE, clear
-  // actLow/actMed/actHigh, clear node rates, and STOP the rAF loop.
+  // After the harness stops, the frontend must decay purely by time:
+  // ACTIVE -> RECENT -> IDLE, clear actLow/actMed/actHigh, clear node
+  // rates, and STOP the rAF loop. On a live machine with REAL ETW the
+  // backend keeps emitting batches for ambient loopback traffic (the UI's
+  // own WebSocket, system services), which legitimately keeps the global
+  // maps non-empty forever — so the deterministic equivalent of a machine
+  // with no further batches is asserted: the activity feed is muted and
+  // every map must empty within the decay window (RECENT_MS = 5 s).
   console.log('\n[Test T] Activity decay (ACTIVE -> RECENT -> IDLE)')
   if (isTier2) {
+    await cdp.eval(`window.__esw_controller?.testMute(true) ?? false`)
     let ovT = null
     let actT = -1
     let ctlT = -1
@@ -689,13 +712,9 @@ async function main() {
     check('T5 controller edgeActivity map cleared', ctlT === 0, `edgeActivity=${ctlT}`)
     const staleNodes = await cdp.eval(EX.staleRateNodes)
     check('T6 stale node net rates cleared', staleNodes === 0, `nodes=${staleNodes}`)
-    // rAF stop mechanism, deterministic: the lifecycle feed is suspended
-    // (the equivalent of a machine with no connection events) and the
-    // terminal idle state is forced exactly as time-decay eventually
-    // produces it; the next frames must cancel the loop. Real lifecycle
-    // pulses on a live machine legitimately keep the loop alive between
-    // quiet instants — the mechanism, not the machine, is asserted here.
-    await cdp.eval(`window.__esw_controller?.testMute(true) ?? false`)
+    // rAF stop mechanism, deterministic: the terminal idle state is forced
+    // exactly as time-decay eventually produces it; the next frames must
+    // cancel the loop.
     await cdp.eval(`window.__esw_controller?.testForceIdle() ?? false`)
     await sleep(400)
     const ovStopped = JSON.parse(await cdp.eval(EX.overlayStats))

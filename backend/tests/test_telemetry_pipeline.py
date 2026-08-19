@@ -162,6 +162,93 @@ def test_telemetry_tick_survives_provider_failure(monkeypatch):
     assert cnt["activity_batches_emitted"] >= 1  # telemetry flows again
 
 
+# -------------------------------------------- modern TCB schema (Windows 11)
+
+def _modern_conn(task, tcb, pid, lip, lport, rip, rport, pid_field="ProcessId"):
+    """Real Windows 11 TCPIP identity event shape (empirically probed)."""
+    return (0, {
+        "Task Name": task, "Tcb": f"0x{tcb:016X}", pid_field: str(pid),
+        "LocalAddress": f"{lip}:{lport}", "RemoteAddress": f"{rip}:{rport}",
+    })
+
+
+def _modern_xfer(task, tcb, size):
+    field = "BytesSent" if task == "TCPDATATRANSFERSEND" else "NumBytes"
+    return (0, {"Task Name": task, "Tcb": f"0x{tcb:016X}", field: str(size)})
+
+
+def test_full_chain_modern_tcb_etw_to_edge_activity():
+    """THE modern-schema regression: connection identity -> TCB map ->
+    transfer events -> provider queue -> drain -> record_many -> aggregator
+    -> mapped directional edge activity. Real loopback client/server pair."""
+    p1 = make_proc(pid=100, name="client.exe")
+    p2 = make_proc(pid=200, name="server.exe")
+    c1 = make_conn(pid=100, lport=53121, rip="127.0.0.1", rport=19735, kind="localhost")
+    c2 = make_conn(pid=200, lport=19735, rip="127.0.0.1", rport=53121, kind="localhost")
+    topo, agg = _setup([p1, p2], [c1, c2])
+    eid = next(iter(topo.edges))
+
+    prov = EtwTcpipProvider()
+    # client-side connection established after session start
+    prov._on_event(_modern_conn("TCPCONNECTTCBCOMPLETE", 0xABC1, 100,
+                                "127.0.0.1", 53121, "127.0.0.1", 19735))
+    # server-side accepted connection
+    prov._on_event(_modern_conn("TCPACCEPTLISTENERCOMPLETE", 0xABC2, 200,
+                                "127.0.0.1", 19735, "127.0.0.1", 53121))
+    # real traffic both ways
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0xABC1, 4096))   # client -> server
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0xABC1, 8192))   # client -> server
+    prov._on_event(_modern_xfer("TCPDATATRANSFERRECEIVE", 0xABC1, 2048))  # client <- server
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0xABC2, 2048))   # server -> client
+    prov._on_event(_modern_xfer("TCPDATATRANSFERRECEIVE", 0xABC2, 4096 + 8192))  # server <- client
+
+    events = prov.drain()
+    assert len(events) == 5
+    agg.record_many(events)
+
+    items, _, _ = agg.flush()
+    assert len(items) == 1
+    it = items[0]
+    assert it["edge_id"] == eid
+    # fwd = source->target (client -> server) = client OUT + server IN
+    assert it["fwd_bytes"] == 4096 + 8192 + (4096 + 8192)
+    # rev = target->source (server -> client) = server OUT + client IN
+    assert it["rev_bytes"] == 2048 + 2048
+    assert it["fwd_bps"] > 0 and it["rev_bps"] > 0
+
+    cnt = agg.counters()
+    assert cnt["events_recorded"] == 5
+    assert cnt["events_mapped_to_edges"] == 5
+    assert cnt["activity_batches_emitted"] == 1
+    prov_cnt = prov.counters()
+    assert prov_cnt["tcb_mappings_created"] == 2
+    assert prov_cnt["tcb_lookup_hits"] == 5
+    assert prov_cnt["tcb_lookup_misses"] == 0
+
+
+def test_full_chain_modern_rundown_bootstrap_pre_existing():
+    """Connections that existed BEFORE the backend started must be learned
+    from TcpConnectionRundown and immediately attribute traffic."""
+    p = make_proc(pid=1234, name="chrome.exe")
+    c = make_conn(pid=1234, lip="192.168.1.5", lport=51000,
+                  rip="104.18.22.44", rport=443)
+    topo, agg = _setup([p], [c])
+    eid = next(iter(topo.edges))
+
+    prov = EtwTcpipProvider()
+    prov._on_event(_modern_conn("TCPCONNECTIONRUNDOWN", 0xBEEF, 1234,
+                                "192.168.1.5", 51000, "104.18.22.44", 443,
+                                pid_field="Pid"))
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0xBEEF, 1500))
+    prov._on_event(_modern_xfer("TCPDATATRANSFERRECEIVE", 0xBEEF, 300))
+
+    agg.record_many(prov.drain())
+    items, _, _ = agg.flush()
+    assert len(items) == 1 and items[0]["edge_id"] == eid
+    assert items[0]["fwd_bytes"] == 1500 and items[0]["rev_bytes"] == 300
+    assert prov.counters()["tcb_lookup_hits"] == 2
+
+
 # ------------------------------------------------- queue health + counters
 
 def test_provider_queue_bounded_with_drop_count():
@@ -220,6 +307,167 @@ def test_aggregator_attribution_counters():
     lb = cnt["last_batch"]
     assert lb["fwd_bytes"] == 4096
     assert lb["rev_bytes"] == 0
+
+
+# --------------------- wildcard local-IP fallback (v0.2.2 final bug)
+
+def test_wildcard_local_ip_attributed_to_correct_edge():
+    """THE v0.2.2 regression: real Windows ETW reports outbound client
+    sockets with local address '0.0.0.0' while psutil topology carries the
+    resolved source IP (192.168.x.x). The event must map to the CORRECT
+    edge via the unique wildcard fallback — and must NOT fall through to
+    node-only attribution."""
+    p = make_proc(pid=1234, name="chrome.exe")
+    c = make_conn(pid=1234, lip="192.168.1.50", lport=53000,
+                  rip="104.18.22.44", rport=443)
+    topo, agg = _setup([p], [c])
+    eid = next(iter(topo.edges))
+
+    prov = EtwTcpipProvider()
+    # real Windows 11 shape: the identity event itself carries the
+    # wildcard local address (empirically observed in fresh sessions)
+    prov._on_event(_modern_conn("TCPCONNECTIONRUNDOWN", 0x0A0A, 1234,
+                                "0.0.0.0", 53000, "104.18.22.44", 443,
+                                pid_field="Pid"))
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0x0A0A, 4096))
+    prov._on_event(_modern_xfer("TCPDATATRANSFERRECEIVE", 0x0A0A, 2048))
+
+    agg.record_many(prov.drain())
+    items, _, node_items = agg.flush()
+
+    assert len(items) == 1
+    assert items[0]["edge_id"] == eid
+    assert items[0]["fwd_bytes"] == 4096      # OUT -> owner_is_src -> fwd
+    assert items[0]["rev_bytes"] == 2048      # IN  -> owner_is_src -> rev
+    assert node_items == []                   # NOT degraded to node-only
+    cnt = agg.counters()
+    assert cnt["events_mapped_to_edges"] == 2
+    assert cnt["events_mapped_to_nodes"] == 0
+    assert cnt["exact_lookup_hits"] == 0
+    assert cnt["wildcard_lookup_hits"] == 2
+    assert cnt["wildcard_lookup_misses"] == 0
+    assert cnt["wildcard_lookup_ambiguous"] == 0
+
+
+def test_wildcard_local_ip_v6_unique_fallback():
+    """IPv6 variant: ETW local address '::' with a resolved v6 topology
+    address — the same unique wildcard fallback must attribute safely."""
+    p = make_proc(pid=1234, name="chrome.exe")
+    c = make_conn(pid=1234, lip="2a02:214c:8000:100::45", lport=53000,
+                  rip="2a06:98c1:3120::1", rport=443)
+    topo, agg = _setup([p], [c])
+    eid = next(iter(topo.edges))
+
+    prov = EtwTcpipProvider()
+    # bracketed '[::]:port' is the real ETW v6 wildcard shape
+    prov._on_event((0, {
+        "Task Name": "TCPCONNECTIONRUNDOWN", "Tcb": "0x0000000000000B0B",
+        "Pid": "1234",
+        "LocalAddress": "[::]:53000", "RemoteAddress": "[2a06:98c1:3120::1]:443",
+    }))
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0x0B0B, 8192))
+
+    agg.record_many(prov.drain())
+    items, _, node_items = agg.flush()
+
+    assert len(items) == 1 and items[0]["edge_id"] == eid
+    assert items[0]["fwd_bytes"] == 8192
+    assert node_items == []
+    cnt = agg.counters()
+    assert cnt["events_mapped_to_edges"] == 1
+    assert cnt["wildcard_lookup_hits"] == 1
+    assert cnt["wildcard_lookup_misses"] == 0
+    assert cnt["wildcard_lookup_ambiguous"] == 0
+
+
+def test_ambiguous_wildcard_fallback_never_guesses():
+    """Two topology edges share the wildcard fallback identity (pid,
+    local_port, remote_ip, remote_port) with different resolved local IPs.
+    The aggregator must NOT pick one arbitrarily: no edge mapping, the
+    ambiguity counter increments, and the event stays process-attributed."""
+    from app.models.entities import Stats, TEdge, TNode, TopologyResult
+
+    p1 = make_proc(pid=1234, name="chrome.exe")
+    c1 = make_conn(pid=1234, lip="192.168.1.50", lport=53000,
+                   rip="104.18.22.44", rport=443)
+    c2 = make_conn(pid=1234, lip="10.1.2.3", lport=53000,
+                   rip="104.18.22.44", rport=443)
+    snap = make_snap([p1], [c1, c2])
+    n_src = p1.stable_id
+    n_tgt = "ext:104.18.22.44"
+    topo = TopologyResult(
+        ts=100.0,
+        nodes={
+            n_src: TNode(id=n_src, kind="process", label="chrome.exe"),
+            n_tgt: TNode(id=n_tgt, kind="external", label="104.18.22.44"),
+        },
+        edges={
+            "e1": TEdge(id="e1", source=n_src, target=n_tgt, kind="EXTERNAL",
+                        proto="tcp", ports=[53000], active=True),
+            "e2": TEdge(id="e2", source=n_src, target=n_tgt, kind="EXTERNAL",
+                        proto="tcp", ports=[53000], active=True),
+        },
+        conn_targets={
+            c1.key: (n_tgt, "EXTERNAL", "e1"),
+            c2.key: (n_tgt, "EXTERNAL", "e2"),
+        },
+        stats=Stats(),
+    )
+    agg = ActivityAggregator(Settings())
+    agg._last_flush = time.time() - 0.2
+    agg.set_topology(snap, topo)
+
+    prov = EtwTcpipProvider()
+    prov._on_event(_modern_conn("TCPCONNECTIONRUNDOWN", 0x0C0C, 1234,
+                                "0.0.0.0", 53000, "104.18.22.44", 443,
+                                pid_field="Pid"))
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0x0C0C, 4096))
+
+    agg.record_many(prov.drain())
+    items, _, node_items = agg.flush()
+
+    assert items == []                    # NO arbitrary edge selection
+    assert len(node_items) == 1           # process-attributed, not lost
+    cnt = agg.counters()
+    assert cnt["events_mapped_to_edges"] == 0
+    assert cnt["events_mapped_to_nodes"] == 1
+    assert cnt["wildcard_lookup_ambiguous"] == 1
+    assert cnt["wildcard_lookup_hits"] == 0
+    assert cnt["wildcard_lookup_misses"] == 0
+
+
+def test_non_wildcard_local_ip_never_uses_fallback():
+    """A non-wildcard ETW local address that misses the exact key must NOT
+    trigger the wildcard fallback even when the fallback identity exists —
+    it could belong to a DIFFERENT edge."""
+    p = make_proc(pid=1234, name="chrome.exe")
+    c = make_conn(pid=1234, lip="192.168.1.50", lport=53000,
+                  rip="104.18.22.44", rport=443)
+    topo, agg = _setup([p], [c])
+    eid = next(iter(topo.edges))
+
+    prov = EtwTcpipProvider()
+    prov._on_event(_modern_conn("TCPCONNECTIONRUNDOWN", 0x0D0D, 1234,
+                                "192.168.1.50", 53000, "104.18.22.44", 443,
+                                pid_field="Pid"))   # exact -> edge
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0x0D0D, 2048))
+    # same fallback identity but a RESOLVED local IP matching nothing
+    prov._on_event(_modern_conn("TCPCONNECTIONRUNDOWN", 0x0D0E, 1234,
+                                "192.168.1.99", 53000, "104.18.22.44", 443,
+                                pid_field="Pid"))
+    prov._on_event(_modern_xfer("TCPDATATRANSFERSEND", 0x0D0E, 1024))
+
+    agg.record_many(prov.drain())
+    items, _, node_items = agg.flush()
+
+    assert len(items) == 1 and items[0]["edge_id"] == eid
+    assert items[0]["fwd_bytes"] == 2048      # only the exact-matching bytes
+    assert len(node_items) == 1               # the 1024 went to the node halo
+    cnt = agg.counters()
+    assert cnt["exact_lookup_hits"] == 1
+    assert cnt["wildcard_lookup_hits"] == 0
+    assert cnt["wildcard_lookup_misses"] == 0
+    assert cnt["wildcard_lookup_ambiguous"] == 0
 
 
 # ------------------------------------- synthetic provider (LOGICAL TIER2)

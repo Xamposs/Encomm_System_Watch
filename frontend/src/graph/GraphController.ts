@@ -182,6 +182,7 @@ export class GraphController {
   private search = ''
   private tooltip: HTMLDivElement | null = null
   private edgeActivity = new Map<string, EdgeActivityState>()
+  private activityMuted = false
   private activityDecayTimer: number | undefined
   private telemetrySource = 'SOCKET EVENTS'
   private familyView: ViewMode = 'nodes'
@@ -227,6 +228,7 @@ export class GraphController {
   // ------------------------------------------------------------- activity
 
   applyActivity(items: NetworkActivityItem[], nodes: NetworkActivityNode[]): void {
+    if (this.activityMuted) return
     const now = performance.now()
     const touched = new Set<string>()
     for (const it of items) {
@@ -357,9 +359,14 @@ export class GraphController {
     this.overlay.testForceIdle()
   }
 
-  /** TEST ONLY (acceptance Test T3): mute the lifecycle pulse feed while
-   * verifying the rAF stop mechanism (see EdgePulseOverlay.testMute). */
+  /** TEST ONLY (acceptance Test T): mute activity ingestion AND the
+   * lifecycle pulse feed while verifying the full time-based decay path
+   * deterministically (see EdgePulseOverlay.testMute). On a live machine
+   * with real ETW, ambient loopback traffic legitimately keeps refreshing
+   * the activity maps forever, so the equivalent of a machine with no
+   * further network_activity batches is asserted instead. */
   testMute(muted: boolean): void {
+    this.activityMuted = muted
     this.overlay.testMute(muted)
   }
 

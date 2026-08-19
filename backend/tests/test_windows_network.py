@@ -124,6 +124,39 @@ class _FakeConsumer:
     process_thread = _FakeThread()
 
 
+def test_provider_info_receives_ctypes_guid_not_string(monkeypatch):
+    """Regression guard for the pywintrace GUID fix.
+
+    pywintrace's ProviderInfo passes the guid through ctypes.byref(), which
+    rejects a bare Python string with "byref() argument must be a ctypes
+    instance". The provider must hand it an etw.GUID (ctypes struct), and
+    the TCPIP GUID must round-trip.
+    """
+    import ctypes as ct
+
+    import etw as etw_mod
+
+    captured = {}
+
+    def fake_provider_info(name, guid, **kw):
+        captured["name"] = name
+        captured["guid"] = guid
+        captured["keywords"] = kw.get("any_keywords")
+        return object()
+
+    monkeypatch.setattr(etw_mod, "ProviderInfo", fake_provider_info)
+    monkeypatch.setattr(etw_mod, "ETW", lambda **kw: _FakeEtw())
+    prov = EtwTcpipProvider()
+    assert prov.start() is True
+    guid = captured["guid"]
+    assert isinstance(guid, etw_mod.GUID), (
+        "ProviderInfo guid must be a ctypes GUID instance, not a str")
+    assert ct.sizeof(guid) == 16  # 4+2+2+8 ctypes layout
+    assert captured["name"] == "Microsoft-Windows-TCPIP"
+    assert captured["keywords"] == 0xFFFFFFFFFFFFFFFF
+    prov.stop()
+
+
 def test_start_denied_reports_elevation_required(monkeypatch):
     import etw as etw_mod
 

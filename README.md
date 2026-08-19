@@ -150,6 +150,13 @@ amber **DEMO MODE** badge.
 - `psutil.net_connections()` may need elevation on some systems to see
   sockets owned by elevated processes; the collector degrades gracefully
   (per-family fallback, `pid=None` sockets attributed to the SYSTEM node).
+- **Per-edge byte telemetry (Tier 2) requires an Administrator backend.**
+  The real `Microsoft-Windows-TCPIP` ETW provider is access-denied for
+  unelevated processes; SYSTEM WATCH never auto-elevates — an unelevated
+  backend truthfully reports Tier 0 (socket lifecycle + adapter totals)
+  and `elevation_required=true`. Run the backend from an elevated
+  PowerShell to enable real per-edge traffic (verified end-to-end in
+  v0.2.2 with `tools/verify_tier2.ps1`).
 
 ## Backend tests
 
@@ -182,8 +189,11 @@ node tools/acceptance.mjs        # exit 0 = all tests passed
 ## Known limitations
 
 - **Connection establishment ≠ packet traffic.** Pulses fire on real
-  `CONNECTION_OPENED/CLOSED` events from socket-table diffs. There is no
-  packet-level monitoring yet (planned: later phases).
+  `CONNECTION_OPENED/CLOSED` events from socket-table diffs. Real
+  per-edge byte traffic (direction + bytes + PID per connection) comes
+  from the elevated ETW Tier 2 provider (v0.2.2+, metadata only — never
+  payloads); without an elevated backend only lifecycle and adapter
+  totals are shown.
 - Windows exposes limited parent-of-socket information; unpaired loopback
   sockets appear as `LOCAL_ENDPOINT` nodes rather than guessed pairs.
 - The full-metadata first pass takes ~8s on a busy desktop; steady-state

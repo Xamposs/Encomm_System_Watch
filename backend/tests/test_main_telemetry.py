@@ -57,7 +57,8 @@ def test_api_telemetry_endpoint(client):
     r = client.get("/api/telemetry")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"level", "source", "detail", "elevation_required", "enabled"}
+    assert set(body) == {"level", "source", "detail", "elevation_required",
+                         "enabled", "readiness"}
 
 
 def test_api_telemetry_debug_endpoint(client):

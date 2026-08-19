@@ -68,6 +68,7 @@ class SyntheticActivityProvider(NetworkActivityProvider):
             detail="test-only fabricated events over real loopback sockets — "
                    "NOT real ETW observation; use for pipeline/decay validation",
             elevation_required=False,
+            readiness="ACTIVE",
         )
         self._counters = {"events_received": 0, "events_dropped": 0, "events_drained": 0}
 
@@ -85,6 +86,14 @@ class SyntheticActivityProvider(NetworkActivityProvider):
 
     def stop(self) -> None:
         self._stop.set()
+
+    def mark_degraded(self) -> None:
+        self._capability = Capability(
+            level="TIER0", source="NONE",
+            detail="synthetic provider stopped; falling back to socket lifecycle",
+            elevation_required=False,
+            readiness="DEGRADED",
+        )
 
     def capability(self) -> Capability:
         return self._capability

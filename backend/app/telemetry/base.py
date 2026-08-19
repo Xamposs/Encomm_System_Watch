@@ -30,6 +30,11 @@ class Capability:
     detail: str = "socket lifecycle only"
     elevation_required: bool = False
     enabled: bool = True           # False when telemetry is disabled (demo mode)
+    # Truthful per-edge claim guard: a started ETW session is NOT the same as
+    # usable per-edge bytes. NONE (no provider) -> INITIALIZING (session
+    # alive, no real data event observed yet) -> ACTIVE (real byte events
+    # correlated) -> DEGRADED (session died after being started).
+    readiness: str = "NONE"        # NONE | INITIALIZING | ACTIVE | DEGRADED
 
     def to_dict(self) -> dict:
         return {
@@ -38,6 +43,7 @@ class Capability:
             "detail": self.detail,
             "elevation_required": self.elevation_required,
             "enabled": self.enabled,
+            "readiness": self.readiness,
         }
 
 
@@ -96,6 +102,14 @@ class NetworkActivityProvider:
     def alive(self) -> bool:
         """True while the provider is expected to keep delivering events."""
         return True
+
+    def mark_degraded(self) -> None:
+        """Called by the runtime when a started provider dies mid-flight.
+
+        The provider should truthfully demote its capability (e.g. TIER2 ->
+        TIER0 with a clear detail) so /api/telemetry never overstates what
+        is still available.
+        """
 
     def queue_depth(self) -> int:
         """Current buffered-event count (diagnostics)."""

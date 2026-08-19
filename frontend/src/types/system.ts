@@ -36,6 +36,7 @@ export interface TelemetryInfo {
   detail: string
   elevation_required: boolean
   enabled: boolean
+  readiness?: 'NONE' | 'INITIALIZING' | 'ACTIVE' | 'DEGRADED'
 }
 
 export interface NetStats {

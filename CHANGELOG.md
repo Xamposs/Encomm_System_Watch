@@ -2,6 +2,105 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.2.2] — 2026-08-17
+
+Real Windows ETW per-edge traffic correlation checkpoint (Phase 19 COMPLETE).
+
+### Added
+
+- **Modern Windows 11 TCPIP ETW schema support** — empirically probed and
+  implemented for tcpip.sys 10.0.19041. The modern manifest delivers
+  `TcpDataTransferSend` (`BytesSent`) / `TcpDataTransferReceive`
+  (`NumBytes`) with ONLY a Tcb handle and byte count — no pid, no
+  addresses — so per-edge attribution now works through a **TCB
+  correlation cache**:
+  - `TcpConnectionRundown` — bootstrap snapshot of connections that
+    existed before the session started (Tcb, Pid, addresses).
+  - `TcpConnectTcbComplete` / `TcpConnectTcbProceeding` — new OUTBOUND
+    connection mappings (proceeding used only when it carries a real pid).
+  - `TcpAcceptListenerComplete` — server-side ACCEPTED connection
+    mappings (the previously open question from v0.3.0 probing).
+  - `TcpDataTransferSend`/`Receive` → TCB lookup → real PID + 4-tuple +
+    direction + bytes.
+  - Removal/cleanup: `TcpDisconnectTcbComplete`, `TcpCloseTcbRequest`,
+    `TcpAbortTcbComplete`, `TcpConnectTcbFailure`,
+    `TcpConnectTcbFailedRcvRst`, `TcpConnectionTerminatedRcvRst` (by
+    Tcb), `TcpRstSend` (by sockaddr tuple — its Tcb is 0x0),
+    `TcpTcbStateChange` with CLOSED state, plus a bounded TTL sweep
+    (5 min idle) and a hard 8192-entry cap with oldest-first eviction.
+- **Modern task-name uppercase handling** — task names arrive UPPERCASE
+  from pywintrace's tdh resolution; comparison is case-insensitive so
+  older CamelCase manifests still work.
+- **IPv4/IPv6 endpoint normalization** — `ip:port` and `[v6]:port`
+  parsing, IPv4-mapped IPv6 (`::ffff:`) unwrapping, byte/int/string
+  address forms.
+- **UDP modern self-contained metadata** — `UdpEndpointSendMessages` /
+  `UdpEndpointReceiveMessages` carry Pid, LocalSockAddr, RemoteSockAddr,
+  NumBytes and are attributed directly without correlation.
+- **Readiness lifecycle** (`readiness` in `/api/telemetry`) — NONE →
+  INITIALIZING (session started, no real data event yet) → ACTIVE (first
+  real byte event correlated) → DEGRADED (session died mid-flight). A
+  started ETW session is no longer displayed as fully working per-edge
+  traffic until real bytes have actually been observed.
+- **`pywintrace` ctypes GUID fix (regression-guarded)** —
+  `etw.ProviderInfo(...)` now receives `etw.GUID(...)` instead of a bare
+  string; pywintrace passes the guid through `ctypes.byref()` which
+  rejects strings. Guarded by
+  `test_provider_info_receives_ctypes_guid_not_string`.
+- New TCB-correlation test suite (`test_tcb_correlation.py`) + two
+  full-chain modern-schema regression tests in `test_telemetry_pipeline.py`.
+- **Wildcard local-IP edge attribution (final fix)** — real Windows ETW
+  reports OUTBOUND client sockets with the pre-route wildcard local
+  address (`0.0.0.0` / `::` / empty) while psutil topology carries the
+  resolved source IP, so exact 5-tuple matching alone left
+  `events_mapped_to_edges = 0` for external traffic. The aggregator now:
+  - keeps the exact 5-tuple match as the always-winning first lookup;
+  - falls back (ONLY for wildcard local addresses) to a
+    `(pid, local_port, remote_ip, remote_port)` index built from the
+    topology, attributing only when it identifies EXACTLY ONE edge;
+  - never guesses between multiple candidates (ambiguity is counted, the
+    event stays process-attributed);
+  - exposes bounded diagnostic counters via the read-only
+    `/api/telemetry/debug`: `exact_lookup_hits`,
+    `wildcard_lookup_hits`, `wildcard_lookup_misses`,
+    `wildcard_lookup_ambiguous`.
+- Four new wildcard regression tests in `test_telemetry_pipeline.py`
+  (0.0.0.0 → correct edge with directional bytes and no node fallthrough,
+  IPv6 `[::]` unique fallback, ambiguous fallback never guesses,
+  non-wildcard addresses never use the fallback).
+
+### Verified
+
+- **Real elevated ETW verification** — `tools/verify_tier2.ps1` passes
+  ALL checks with REAL `Microsoft-Windows-TCPIP` ETW (elevated session):
+  provider received/drained, aggregator recorded/mapped, activity
+  batches, and real directional bytes in both directions.
+- **98 backend tests pass / 0 failed**; frontend `typecheck` and `build`
+  pass.
+- **Real frontend traffic particle validation** — acceptance against the
+  real elevated ETW backend: Tests R/S/T green, including REAL DATA
+  particles produced by real observed byte telemetry on real edges
+  (lifecycle pulses are not counted as evidence), and full
+  ACTIVE → RECENT → IDLE decay (deterministic via the feed-mute test
+  seam, because ambient loopback traffic on a live machine legitimately
+  keeps the global maps non-empty).
+- `verify_tier2.ps1` now polls directional bytes across the harness
+  window (identity events arrive in delayed batches, up to ~35 s) instead
+  of sampling a single ~200 ms flush window.
+
+### Limitations
+
+- Per-edge TCP attribution depends on TCB identity events, which arrive
+  in delayed batches (empirically up to ~35 s) — short traffic bursts can
+  be missed. Byte counts are per-segment accounting and approximate
+  application payload sizes; retransmissions and ACK-only segments are
+  excluded by construction.
+- REAL Tier 2 requires an Administrator backend session; SYSTEM WATCH
+  never auto-elevates. Unelevated backends truthfully report TIER0 +
+  adapter totals. The synthetic provider remains opt-in
+  (`ESW_TELEMETRY_PROVIDER=synthetic`), TEST-ONLY and clearly labeled —
+  it is never evidence for real ETW.
+
 ## [0.2.1] — 2026-08-16
 
 Tier-2 traffic pipeline correctness and activity-decay checkpoint.

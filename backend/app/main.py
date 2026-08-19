@@ -216,6 +216,15 @@ def _telemetry_tick() -> tuple[list, list, list]:
         events = telemetry_provider.drain()
         if events:
             aggregator.record_many(events)
+        # keep /api/telemetry truthful as readiness transitions
+        # (INITIALIZING -> ACTIVE once real data events are observed)
+        try:
+            cap = telemetry_provider.capability()
+            if cap.to_dict() != _state["telemetry"]:
+                _state["telemetry"] = cap.to_dict()
+                aggregator.set_capability(cap)
+        except Exception:  # noqa: BLE001 — capability refresh must never kill
+            pass
     return aggregator.flush()
 
 
@@ -249,11 +258,8 @@ async def _telemetry_loop() -> None:
         try:
             if telemetry_provider is not None and _capability_dict().get("level") == "TIER2":
                 if not telemetry_provider.alive():
-                    cap = Capability(
-                        level="TIER0", source="NONE",
-                        detail="ETW session ended; falling back to socket lifecycle",
-                        elevation_required=True,
-                    )
+                    telemetry_provider.mark_degraded()
+                    cap = telemetry_provider.capability()
                     aggregator.set_capability(cap)
                     _state["telemetry"] = cap.to_dict()
                     log.warning("telemetry provider died — demoted to TIER0")
@@ -320,7 +326,7 @@ async def lifespan(_: FastAPI):
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.1", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.2", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
