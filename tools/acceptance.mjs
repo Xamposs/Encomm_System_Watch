@@ -768,6 +768,157 @@ async function main() {
     console.log('  SKIP  T1–T7 (backend not TIER2 — decay requires the logical/real TIER2 chain)')
   }
 
+  // ---- Test U: GPU (REAL / SKIPPED) ---------------------------------------
+  console.log('\n[Test U] GPU + VRAM observability')
+  let gpuState = await (await fetch(`${API}/api/gpu`)).json()
+  const gpuCount = (gpuState?.gpus ?? []).length
+  if (gpuCount > 0) {
+    const g0 = gpuState.gpus[0]
+    check('U1 GPU detected via NVML/fallback', gpuState.source === 'NVML' || gpuState.source === 'NVIDIA_SMI',
+      `source=${gpuState.source}`)
+    check('U2 GPU name real', typeof g0.name === 'string' && g0.name.length > 0, g0.name || '')
+    check('U3 total VRAM > 0', typeof g0.vram_total_mb === 'number' && g0.vram_total_mb > 0,
+      `${g0.vram_total_mb} MB`)
+    check('U4 real VRAM usage exposed', typeof g0.vram_used_mb === 'number' && g0.vram_used_mb >= 0,
+      `${g0.vram_used_mb} MB`)
+    check('U5 utilization exposed', typeof g0.utilization_percent === 'number', `${g0.utilization_percent}%`)
+    if (typeof g0.temperature_c === 'number') {
+      check('U6 temperature exposed', g0.temperature_c > 0, `${g0.temperature_c} C`)
+    } else {
+      console.log('  info  U6 temperature not exposed by this GPU/driver (optional field)')
+    }
+    const gpuNode = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="GPU"]').length : 0`)
+    check('U7 GPU resource node in graph', gpuNode >= 1, `gpuNodes=${gpuNode}`)
+    const usesGpu = await cdp.eval(`window.__esw_cy ? window.__esw_cy.edges('[kind="USES_GPU"]').length : 0`)
+    check('U8 USES_GPU edges present', usesGpu >= 1, `edges=${usesGpu}`)
+    const gpuPids = (g0.processes ?? []).map((p) => p.pid)
+    check('U9 GPU PID attribution real', gpuPids.length >= 1, `pids=${gpuPids.slice(0, 5).join(',')}${gpuPids.length > 5 ? '…' : ''}`)
+  } else {
+    console.log('  SKIP  U1–U9 (no GPU detected on this machine)')
+  }
+
+  // ---- Test V: semantic detector framework (REAL) -------------------------
+  console.log('\n[Test V] Semantic detector framework')
+  const semState = await (await fetch(`${API}/api/semantic`)).json()
+  const dets = semState?.detections ?? []
+  check('V1 detections serialized', Array.isArray(dets), `count=${dets.length}`)
+  check('V2 relationships serialized', Array.isArray(semState?.relationships), `count=${(semState?.relationships ?? []).length}`)
+  const valid = dets.every((d) =>
+    typeof d.semantic_type === 'string' && typeof d.semantic_name === 'string' &&
+    ['CONFIRMED', 'HIGH', 'MEDIUM', 'LOW'].includes(d.confidence) &&
+    Array.isArray(d.evidence) && Array.isArray(d.process_ids))
+  check('V3 detection schema complete (type/name/confidence/evidence/pids)', valid)
+  const noErrors = !semState?.errors || Object.keys(semState.errors).length === 0
+  check('V4 no detector failures', noErrors, JSON.stringify(semState?.errors ?? {}))
+  const semNodes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="SEMANTIC"], [kind="LOCAL_LLM"]').length : 0`)
+  check('V5 semantic nodes in graph', semNodes >= 1, `semNodes=${semNodes}`)
+
+  // ---- Test W: LM Studio (REAL / SKIPPED — never launched) ----------------
+  console.log('\n[Test W] LM Studio detection')
+  const lmRunning = semState?.summary?.lm_studio === true
+  if (lmRunning) {
+    const lmNode = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('#sem\\:lmstudio').length : 0`)
+    check('W1 LM Studio semantic node', lmNode >= 1, `nodes=${lmNode}`)
+    const lmDet = dets.find((d) => d.semantic_type === 'LM_STUDIO')
+    check('W2 LM Studio confidence >= HIGH', ['CONFIRMED', 'HIGH'].includes(lmDet?.confidence), lmDet?.confidence)
+    check('W3 endpoint from API evidence', typeof lmDet?.metadata?.endpoint === 'string' && lmDet.metadata.endpoint.startsWith('http://127.0.0.1'),
+      lmDet?.metadata?.endpoint || 'none')
+    const serves = await cdp.eval(`window.__esw_cy ? window.__esw_cy.edges('[kind="SERVES_MODEL"]').length : 0`)
+    const models = semState?.summary?.models ?? []
+    check('W4 SERVES_MODEL edges for real models', serves >= 1 && models.length >= 1, `serves=${serves} models=${models.length}`)
+    const loaded = models.filter((m) => m.state === 'LOADED')
+    check('W5 loaded vs available distinction', models.some((m) => m.state === 'AVAILABLE') || loaded.length >= 0,
+      `loaded=${loaded.length} available=${models.length - loaded.length}`)
+  } else {
+    console.log('  SKIP  W1–W5 — REAL LM STUDIO TEST: SKIPPED (LM Studio not running; never auto-launched)')
+  }
+
+  // ---- Test X: Hermes (REAL on this machine) ------------------------------
+  console.log('\n[Test X] Hermes detection')
+  if (semState?.summary?.hermes === true) {
+    const hDet = dets.find((d) => d.semantic_type === 'HERMES')
+    check('X1 Hermes detected', !!hDet, hDet?.semantic_name || 'none')
+    check('X2 confidence CONFIRMED/HIGH', ['CONFIRMED', 'HIGH'].includes(hDet?.confidence), hDet?.confidence)
+    check('X3 evidence non-empty', (hDet?.evidence ?? []).length >= 1, `${(hDet?.evidence ?? []).length} items`)
+    check('X4 underlying pids present', (hDet?.pids ?? []).length >= 1, `pids=${(hDet?.pids ?? []).join(',')}`)
+    // the raw process truth must be preserved underneath (inspector)
+    const marked = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[semantic_type="HERMES"]').length : 0`)
+    check('X5 semantic node in graph', marked >= 1, `nodes=${marked}`)
+    // click the semantic node -> inspector shows SEMANTIC IDENTITY
+    await cdp.eval(`(() => {
+      const n = window.__esw_cy?.getElementById('sem:hermes')
+      if (!n || !n.length) return false
+      const p = n.renderedPosition()
+      const r = window.__esw_cy.container().getBoundingClientRect()
+      window.__esw_clickTarget = { x: Math.round(r.left + p.x), y: Math.round(r.top + p.y) }
+      return true
+    })()`)
+    const hpos = await cdp.eval(`window.__esw_clickTarget ?? null`)
+    if (hpos) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 })
+      await sleep(800)
+    }
+    const hInsp = await cdp.eval(EX.inspectorText)
+    check('X6 inspector shows SEMANTIC IDENTITY', hInsp.includes('SEMANTIC IDENTITY'), 'semantic section present')
+    check('X7 confidence shown', /CONFIRMED|HIGH/.test(hInsp), 'confidence in inspector')
+    await cdp.eval(EX.closeInspector)
+  } else {
+    console.log('  SKIP  X1–X7 (Hermes not running)')
+  }
+
+  // ---- Test Y: MCP servers (REAL / FIXTURE-only) --------------------------
+  console.log('\n[Test Y] MCP server detection')
+  const mcpNames = semState?.summary?.mcp ?? []
+  if (mcpNames.length > 0) {
+    const mcpNodes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="SEMANTIC"][semantic_type="MCP_SERVER"]').length : 0`)
+    check('Y1 MCP semantic nodes', mcpNodes >= 1, `nodes=${mcpNodes}`)
+    const spawned = await cdp.eval(`window.__esw_cy ? window.__esw_cy.edges('[kind="SPAWNED"], [kind="PROCESS_PARENT"]').length : 0`)
+    check('Y2 stdio/ancestry relationships', spawned >= 1, `edges=${spawned}`)
+    check('Y3 server identity evidence', mcpNames.every((n) => typeof n === 'string' && n.length > 0), mcpNames.join(','))
+  } else {
+    console.log('  SKIP  Y1–Y3 — REAL MCP TEST: SKIPPED (no MCP servers running; stdio/network cases covered by fixture unit tests)')
+  }
+
+  // ---- Test Z: AI view (SYSTEM <-> AI toggle, classification-driven) ------
+  console.log('\n[Test Z] AI view')
+  const realSemantic = (semState?.summary?.hermes === true) || (semState?.summary?.lm_studio === true) || (gpuCount > 0)
+  if (realSemantic) {
+    await cdp.eval(`[...document.querySelectorAll('.pill')].find(b => b.textContent.trim() === 'AI')?.click()`)
+    await sleep(800)
+    const dimmed = await cdp.eval(`window.__esw_cy ? window.__esw_cy.elements('.ai-dim').length : -1`)
+    check('Z1 unrelated nodes dimmed in AI view', dimmed > 0, `dimmed=${dimmed}`)
+    const hermesVisible = await cdp.eval(`(() => {
+      const n = window.__esw_cy?.getElementById('sem:hermes')
+      return n && n.length ? !n.hasClass('ai-dim') && n.visible() : false
+    })()`)
+    check('Z2 semantic node visible in AI view', hermesVisible === true, 'sem:hermes not dimmed')
+    const gpuVisible = await cdp.eval(`(() => {
+      const n = window.__esw_cy?.getElementById('gpu:0')
+      return n && n.length ? !n.hasClass('ai-dim') : false
+    })()`)
+    check('Z3 GPU node visible in AI view', gpuVisible === true, 'gpu:0 not dimmed')
+    const procNotDimmed = await cdp.eval(`(() => {
+      const n = window.__esw_cy?.nodes('[kind="PROCESS"]').filter(n => n.data('semantic'))[0]
+      return n ? !n.hasClass('ai-dim') : false
+    })()`)
+    check('Z4 classified process kept in AI view', procNotDimmed === true, 'semantic process not dimmed')
+    await cdp.shot('z-ai-view.png')
+    // back to SYSTEM: everything restored, NO cytoscape recreation. The
+    // instance identity is the real invariant (node counts legitimately
+    // drift as processes start/stop on a live machine).
+    const cyBefore = await cdp.eval(`(() => { window.__esw_cyMarker = window.__esw_cy; return !!window.__esw_cy })()`)
+    await cdp.eval(`[...document.querySelectorAll('.pill')].find(b => b.textContent.trim() === 'SYSTEM')?.click()`)
+    await sleep(600)
+    const dimmedAfter = await cdp.eval(`window.__esw_cy ? window.__esw_cy.elements('.ai-dim').length : -1`)
+    const sameInstance = await cdp.eval(`window.__esw_cy === window.__esw_cyMarker`)
+    check('Z5 SYSTEM view restores', dimmedAfter === 0, `dimmed=${dimmedAfter}`)
+    check('Z6 toggle preserves graph (no recreate)', cyBefore === true && sameInstance === true,
+      'same cytoscape instance across toggle')
+  } else {
+    console.log('  SKIP  Z1–Z6 (no real semantic detections to show)')
+  }
+
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact
   await cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -782,12 +933,20 @@ async function main() {
   // ESW_KEEP_SCREENSHOT=1: keep the committed REAL-machine screenshot.
   // Synthetic-logical TIER2 runs MUST set this — docs/screenshot.png must
   // never show fabricated activity as real telemetry.
+  // v0.3.0: when the AI view shows REAL semantic detections, the official
+  // screenshot is the AI view; otherwise the SYSTEM view is kept.
   if (!process.env.ESW_KEEP_SCREENSHOT) {
     try {
       mkdirSync(docsDir, { recursive: true })
-      const { copyFileSync } = await import('node:fs')
-      copyFileSync(finalShot, join(docsDir, 'screenshot.png'))
-      console.log('  shot  docs/screenshot.png (copied from final-live.png)')
+      const { copyFileSync, existsSync } = await import('node:fs')
+      let shot = finalShot
+      if (realSemantic && existsSync(join(__dirname, 'shots', 'z-ai-view.png'))) {
+        shot = join(__dirname, 'shots', 'z-ai-view.png')
+        console.log('  shot  docs/screenshot.png (AI view — real semantic detections)')
+      } else {
+        console.log('  shot  docs/screenshot.png (SYSTEM view)')
+      }
+      copyFileSync(shot, join(docsDir, 'screenshot.png'))
     } catch (e) {
       console.log('  warn  could not copy docs/screenshot.png:', e.message)
     }

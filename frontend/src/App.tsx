@@ -6,7 +6,7 @@ import { FilterBar } from './components/FilterBar'
 import { Inspector } from './components/Inspector'
 import { EventDrawer } from './components/EventDrawer'
 import { Legend } from './components/Legend'
-import type { Filter, ViewMode } from './types/system'
+import type { Filter, SemanticView, ViewMode } from './types/system'
 
 export default function App() {
   const {
@@ -16,6 +16,7 @@ export default function App() {
   const [filter, setFilter] = useState<Filter>('all')
   const [search, setSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('nodes')
+  const [semanticView, setSemanticView] = useState<SemanticView>('system')
   const [focusNode, setFocusNode] = useState<string | null>(null)
   const [focusHops, setFocusHops] = useState(1)
   const [selectionCount, setSelectionCount] = useState(0)
@@ -23,6 +24,11 @@ export default function App() {
   const applyFocus = (id: string | null, hops = focusHops) => {
     setFocusNode(id)
     controllerRef.current?.setFocus(id, hops)
+  }
+
+  const onSemanticViewChange = (v: SemanticView) => {
+    setSemanticView(v)
+    controllerRef.current?.setSemanticView(v === 'ai')
   }
 
   return (
@@ -48,6 +54,8 @@ export default function App() {
           setViewMode(m)
           controllerRef.current?.setViewMode(m)
         }}
+        semanticView={semanticView}
+        onSemanticView={onSemanticViewChange}
         focusNode={focusNode}
         focusHops={focusHops}
         onFocusHops={(h) => {

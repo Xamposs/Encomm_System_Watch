@@ -721,3 +721,76 @@ body,
 ::-webkit-scrollbar-thumb:hover {
   background: #22374a;
 }
+
+/* ================= v0.3.0 — GPU + AI semantic observability ================= */
+
+/* AI view dimming (classification-driven, not string search) */
+.ai-dim {
+  opacity: 0.12 !important;
+  transition: opacity 300ms;
+}
+
+/* AI summary chips in the header — compact, only real detections */
+.ai-summary {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  margin-right: 10px;
+}
+.ai-chip {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border: 1px solid;
+  white-space: nowrap;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.ai-hermes { color: #d8c9ff; border-color: #8b5cf6; }
+.ai-lm { color: #a5e3ff; border-color: #38bdf8; }
+.ai-model { color: #9db6cd; border-color: #5c7590; }
+.ai-model-loaded { color: #a5e3ff; border-color: #38bdf8; }
+.ai-mcp { color: #c4b5fd; border-color: #7c6bb0; }
+.ai-gpu { color: #a7f3d0; border-color: #34d399; }
+
+/* SYSTEM / AI view pills */
+.pill.sem-view.ai-active { border-color: #8b5cf6; color: #d8c9ff; }
+
+/* inspector semantic identity */
+.sem-name { color: #d8c9ff; font-weight: bold; }
+.sem-conf {
+  float: right;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 1px 5px;
+  border: 1px solid;
+  border-radius: 2px;
+}
+.sem-confirmed { color: #6ee7b7; border-color: #34d399; }
+.sem-high { color: #a5e3ff; border-color: #38bdf8; }
+.sem-medium { color: #fcd34d; border-color: #a08a2f; }
+.sem-low { color: #9aa5b1; border-color: #5c6b7a; }
+.sem-evidence {
+  font-size: 9px;
+  color: #9db6cd;
+  margin: 2px 0 0 8px;
+  word-break: break-all;
+}
+.sem-model { font-size: 9px; color: #a5e3ff; margin: 2px 0 0 8px; }
+.sem-model-loaded { color: #6ee7b7; }
+
+/* event drawer semantic rows */
+.ev-semantic { border-left-color: #8b5cf6; }
+.ev-semantic-lost { border-left-color: #5c6b7a; opacity: 0.7; }
+.ev-model { border-left-color: #38bdf8; }
+.ev-gpu { border-left-color: #34d399; }
+.ev-gpu-detach { border-left-color: #5c6b7a; }
+
+/* legend semantic entries */
+.lg-node.lg-sem { background: #231a3d; border-color: #8b5cf6; }
+.lg-node.lg-llm { background: #10273a; border-color: #38bdf8; }
+.lg-node.lg-gpu { background: #12251f; border-color: #34d399; }
+.lg-edge.lg-sem-e { color: #8b5cf6; }

@@ -20,9 +20,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import Settings
-from .models.entities import Event, Snapshot
+from .collectors.gpu import GpuCollector
+from .detectors import SemanticDetectorRegistry
+from .models.entities import Event, Snapshot, TEdge
 from .services.diff_engine import DiffEngine
 from .services.event_stream import EventStream
+from .services.semantic import (
+    EVENT_GPU_PROCESS_ATTACHED,
+    EVENT_GPU_PROCESS_DETACHED,
+    SemanticEngine,
+)
 from .services.topology import TopologyEngine
 from .telemetry import (
     EVENT_TELEMETRY_CAPABILITY_CHANGED,
@@ -65,6 +72,11 @@ stream = EventStream()
 topo_engine = TopologyEngine(cfg)
 diff_engine = DiffEngine(cfg)
 
+# ---- GPU + AI semantic observability (v0.3.0) -----------------------------
+gpu_collector = GpuCollector() if (cfg.gpu_enabled and not cfg.demo_mode) else None
+detector_registry = SemanticDetectorRegistry(cfg)
+semantic_engine = SemanticEngine(cfg)
+
 # ---- network telemetry ----------------------------------------------------
 telemetry_enabled = cfg.telemetry_enabled and not cfg.demo_mode
 
@@ -102,6 +114,12 @@ _state = {
     "skipped": 0,
     "telemetry": None,   # Capability.to_dict()
     "adapter": None,     # {"down_bps": .., "up_bps": ..} adapter totals
+    "gpu": [],           # list of GPU dicts (metrics + PID attribution)
+    "gpu_error": None,
+    "gpu_source": "NONE",
+    "semantic_last_run": 0.0,
+    "semantic_done": False,
+    "detector_errors": {},
 }
 
 
@@ -191,13 +209,20 @@ def _stats_dict() -> dict:
             "adapter_up_bps": adapter["up_bps"],
         }
     base["net"] = net
+    base["gpu"] = _state.get("gpu", [])
+    base["semantic"] = semantic_engine.summary()
     return base
 
 
 def _snapshot_message() -> dict:
     topo = _state.get("topology")
-    nodes = [n.to_dict() for n in topo.nodes.values()] if topo else []
-    edges = [e.to_dict() for e in topo.edges.values()] if topo else []
+    if topo is not None:
+        nodes = [n.to_dict() for n in semantic_engine.augment_process_nodes(list(topo.nodes.values()))]
+        nodes += [n.to_dict() for n in semantic_engine.semantic_nodes()]
+        edges = [e.to_dict() for e in topo.edges.values()]
+        edges += [e.to_dict() for e in semantic_engine.semantic_edges()]
+    else:
+        nodes, edges = [], []
     return {
         "type": "snapshot",
         "mode": _state["mode"],
@@ -206,6 +231,8 @@ def _snapshot_message() -> dict:
         "telemetry": _capability_dict(),
         "nodes": nodes,
         "edges": edges,
+        "gpu": _state.get("gpu", []),
+        "semantic": semantic_engine.summary(),
     }
 
 
@@ -274,6 +301,103 @@ async def _telemetry_loop() -> None:
         await asyncio.sleep(max(0.05, cfg.telemetry_flush_ms / 1000.0))
 
 
+_gpu_event_seq = [0]
+
+
+def _next_event_id() -> str:
+    _gpu_event_seq[0] += 1
+    return f"{_gpu_event_seq[0]:06d}-{int(time.time() * 1000)}"
+
+
+def _gpu_pid_event(pid: int, gpus: list[dict], attached: bool) -> dict:
+    """GPU_PROCESS_ATTACHED / GPU_PROCESS_DETACHED (change-only, truthful)."""
+    snap = _state.get("snapshot")
+    sid = None
+    name = ""
+    if snap is not None:
+        for s, p in snap.processes.items():
+            if p.pid == pid:
+                sid, name = s, p.name
+                break
+    gpu_index = 0
+    vram_mb = None
+    for g in gpus:
+        for proc in g.get("processes", []):
+            if int(proc["pid"]) == pid:
+                gpu_index = g.get("index", 0)
+                vram_mb = proc.get("vram_mb")
+    edge = None
+    edge_id = None
+    if attached and sid is not None:
+        edge_id = f"se:{sid}->gpu:{gpu_index}:USES_GPU"
+        edge = TEdge(
+            id=edge_id, source=sid, target=f"gpu:{gpu_index}", kind="USES_GPU",
+            proto="sem", ports=[], active=True, directed=True,
+        ).to_dict()
+    return Event(
+        event_id=_next_event_id(),
+        event_type=EVENT_GPU_PROCESS_ATTACHED if attached else EVENT_GPU_PROCESS_DETACHED,
+        source=f"gpu:{gpu_index}",
+        target=sid,
+        timestamp=datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        metadata={
+            "pid": pid,
+            "name": name,
+            "sid": sid,
+            "gpu_index": gpu_index,
+            "vram_mb": vram_mb,
+            "edge": edge,
+            "edge_id": edge_id,
+        },
+    ).to_dict()
+
+
+async def _gpu_loop() -> None:
+    """GPU metrics ~1 s, PID attribution ~2 s; never kills the app.
+
+    Publishes a compact ``gpu`` WS message each tick so the frontend keeps
+    GPU node metrics live, and change-only GPU_PROCESS_ATTACHED/DETACHED
+    events when NVML's per-process list changes.
+    """
+    if gpu_collector is None:
+        return
+    last_pid_sample = 0.0
+    prev_gpus: list[dict] = []
+    while True:
+        try:
+            now = time.time()
+            with_pids = now - last_pid_sample >= cfg.gpu_pid_interval_s
+            gpus = await asyncio.to_thread(gpu_collector.sample, with_pids)
+            if with_pids:
+                last_pid_sample = now
+            else:
+                # metrics-only tick: carry the last PID attribution over so
+                # the live stream never flickers processes in/out
+                for g in gpus:
+                    if "processes" in g:
+                        continue
+                    prev = next((x for x in prev_gpus if x.get("index") == g.get("index")), None)
+                    if prev is not None:
+                        g["processes"] = prev.get("processes", [])
+            if gpus:
+                attached, detached = gpu_collector.changed_pids(gpus)
+                batch = []
+                for pid in sorted(attached):
+                    batch.append(_gpu_pid_event(pid, gpus, attached=True))
+                for pid in sorted(detached):
+                    batch.append(_gpu_pid_event(pid, gpus, attached=False))
+                if batch:
+                    stream.publish(batch)
+            _state["gpu"] = gpus
+            prev_gpus = gpus
+            _state["gpu_source"] = gpu_collector.source
+            _state["gpu_error"] = gpu_collector.error
+            stream.publish_message({"type": "gpu", "data": gpus, "ts": time.time()})
+        except Exception:  # noqa: BLE001 — GPU failure must never kill the app
+            log.warning("gpu loop tick failed", exc_info=True)
+        await asyncio.sleep(cfg.gpu_metrics_interval_s)
+
+
 async def _collect_loop() -> None:
     consecutive_errors = 0
     while True:
@@ -287,6 +411,21 @@ async def _collect_loop() -> None:
             topo = topo_engine.build(snap)
             events = diff_engine.diff(snap, topo)
             aggregator.set_topology(snap, topo)
+            # ---- semantic detection (GPU + AI) -----------------------------
+            # Runs on the detector cadence (or on topology change); the
+            # registry is failure-isolated per detector.
+            now = time.time()
+            if now - _state["semantic_last_run"] >= cfg.detector_interval_s or not _state["semantic_done"]:
+                gpu_state = _state.get("gpu", [])
+                detections, rels = await asyncio.to_thread(
+                    detector_registry.run_all, snap, topo, gpu_state
+                )
+                sem_events = semantic_engine.update(detections, rels, gpu_state, snap, topo)
+                _state["semantic_last_run"] = now
+                _state["semantic_done"] = True
+                _state["detector_errors"] = detector_registry.errors
+                if sem_events:
+                    stream.publish([e.to_dict() for e in sem_events])
             if not cfg.demo_mode:
                 adapter = adapter_sampler.sample()
                 if adapter is not None:
@@ -316,9 +455,11 @@ async def lifespan(_: FastAPI):
     _init_telemetry()
     task = asyncio.create_task(_collect_loop())
     ttask = asyncio.create_task(_telemetry_loop())
+    gtask = asyncio.create_task(_gpu_loop())
     yield
     task.cancel()
     ttask.cancel()
+    gtask.cancel()
     try:
         await task
     except asyncio.CancelledError:
@@ -327,11 +468,15 @@ async def lifespan(_: FastAPI):
         await ttask
     except asyncio.CancelledError:
         pass
+    try:
+        await gtask
+    except asyncio.CancelledError:
+        pass
     if telemetry_provider is not None:
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.2.3", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -409,6 +554,27 @@ async def api_telemetry_debug() -> dict:
     }
 
 
+@app.get("/api/gpu")
+async def api_gpu() -> dict:
+    """Current GPU state (metrics + PID attribution), honest source label."""
+    return {
+        "source": _state.get("gpu_source", "NONE"),
+        "error": _state.get("gpu_error"),
+        "gpus": _state.get("gpu", []),
+    }
+
+
+@app.get("/api/semantic")
+async def api_semantic() -> dict:
+    """Current semantic detections + relationships (read-only)."""
+    return {
+        "detections": semantic_engine.detections_dict(),
+        "relationships": semantic_engine.relationships_dict(),
+        "summary": semantic_engine.summary(),
+        "errors": _state.get("detector_errors", {}),
+    }
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
@@ -427,8 +593,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
             except asyncio.TimeoutError:
                 item = None
             if item is not None:
-                if item.get("type") == "network_activity":
-                    # already a complete protocol message (activity batch)
+                if item.get("type") in ("network_activity", "gpu"):
+                    # already a complete protocol message (activity batch / gpu state)
                     await ws.send_json(item)
                 else:
                     batch = [item]
@@ -437,7 +603,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             nxt = queue.get_nowait()
                         except asyncio.QueueEmpty:
                             break
-                        if nxt.get("type") == "network_activity":
+                        if nxt.get("type") in ("network_activity", "gpu"):
                             await ws.send_json(nxt)
                             continue
                         batch.append(nxt)

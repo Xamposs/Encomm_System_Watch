@@ -3,29 +3,39 @@
 A **local-first, read-only observability map** for Windows 11. Processes,
 agents, watchers, services and their real network connections are visualized
 as a living topology graph — a dark, dense, control-room-style map of what the
-machine is actually doing, in real time.
+machine is actually doing, in real time. Since v0.3.0 the map also understands
+**semantic identity**: Hermes, LM Studio, local LLMs, MCP servers and the GPU
+are detected with evidence-backed confidence, layered on top of the raw
+process truth.
 
 > The graph is the product. This is **not** a traditional metrics dashboard.
 
 ```
 Chrome ────────────▶ External 104.x.x.x:443
    │
-   └──────────────▶ Hermes ──────▶ 127.0.0.1:1234 ──────▶ LM Studio
-                                                              │
-                                                              └──▶ GPU
+   └──────────────▶ ◈ HERMES ── HOSTS ──▶ 127.0.0.1:port
+                          │ MEMBER_OF
+                          ▼
+                    Hermes.exe · python gateway ── SPAWNED ──▶ MCP SERVER
+                                                              (filesystem)
+◉ LM STUDIO ── SERVES_MODEL ──▶ LOCAL LLM (qwen3-4b, LOADED)
+   │ USES_GPU
+   ▼
+GPU 0 · NVIDIA GeForce GTX 1660 Ti · 74% · 5.2/6.0 GB
 ```
 
 When real activity is detected (a connection opens, a process starts), the
 corresponding edge **pulses** with a traveling signal. No fake data, no
-invented relationships — only what the Windows socket table and process table
-actually show.
+invented relationships — only what the Windows socket table, process table,
+NVML and local APIs actually show.
 
 ---
 
 ## Screenshot
 
 ![ENCOMM SYSTEM WATCH](docs/screenshot.png)
-*(placeholder — replace with a capture of the live map)*
+*(live map — REAL machine data: SYSTEM view; the AI view shows only semantic
+detections that are actually present)*
 
 ## Quick start (Windows 11)
 
@@ -90,7 +100,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PHASES.md](docs/PHASE
 ## What it shows (all real)
 
 - **Processes** — every accessible process: name, PID, stable ID, exe, user,
-  status, CPU %, RAM, threads, parent PID, start time, command line.
+  status, CPU %, RAM, threads, parent PID, start time, command line
+  (credential-looking values redacted).
   Inaccessible/vanishing processes are skipped without crashing the loop.
 - **TCP + UDP sockets** — classified as:
   - `LISTENING` (bound port → `LISTENING_PORT` node)
@@ -98,8 +109,20 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PHASES.md](docs/PHASE
     sides can be mapped)
   - `EXTERNAL` (remote endpoint → `EXTERNAL_ENDPOINT` node per IP, capped with
     overflow aggregation)
+- **GPU + VRAM (v0.3.0)** — per-GPU resource nodes (utilization, VRAM
+  used/total, temperature, power, driver, fan, clocks via NVML; nvidia-smi
+  fallback), per-process GPU attribution → `USES_GPU` edges, change-only
+  `GPU_PROCESS_ATTACHED/DETACHED` events.
+- **Semantic AI identities (v0.3.0)** — evidence-backed detection of
+  **HERMES** (desktop app + gateway), **LM STUDIO** (localhost API-probed,
+  LOADED vs AVAILABLE models), **MCP servers** (stdio + HTTP/SSE), with
+  confidence CONFIRMED/HIGH/MEDIUM/LOW, full evidence lists in the
+  inspector, and semantic relationships (`SERVES_MODEL`, `SPAWNED`,
+  `PROCESS_PARENT`, `HOSTS`, `MEMBER_OF`, `LOCAL_API`). Raw process truth is
+  always preserved underneath.
 - **Live events** — process start/stop, connection open/close, throttled
-  metric updates. Real events drive real pulses on the edges.
+  metric updates, semantic detections, GPU attach/detach. Real events drive
+  real pulses on the edges.
 - **Machine metrics** — overall CPU/RAM in the header, per-process CPU/RAM on
   nodes and in the inspector.
 
@@ -107,11 +130,19 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PHASES.md](docs/PHASE
 
 - Fullscreen dark topology canvas (zoom / pan / fit)
 - Compact process cards: `name / PID / CPU / RAM`
+- **SYSTEM / AI view toggle** — the AI view keeps only semantic resources
+  (Hermes, LM Studio, models, MCP, GPU) + their classified processes and
+  GPU-attributed processes; everything else dims. Classification-driven,
+  graph state preserved.
 - **Live signal pulses** — traveling particles on edges with real events;
   recently-active edges keep a subtle flow; closed connections fade out
 - **LIVE EVENT DRAWER** — bounded 800-event chronological feed
-- **Node inspector** — read-only details on click (no control buttons anywhere)
+- **Node inspector** — read-only details on click (no control buttons
+  anywhere); semantic nodes show SEMANTIC IDENTITY (confidence, evidence,
+  underlying PIDs), GPU nodes show full GPU metrics
 - Filters: ALL · ACTIVE CONNECTIONS · LISTENING · HIGH CPU; process search
+- Header AI summary chips (`HERMES ●`, `LM STUDIO ●`, `MODEL …`, `MCP n`,
+  `GPU …`) — only categories actually detected
 - Honest status: `● LIVE` / `● CONNECTING` / `● DISCONNECTED`, auto-reconnect
 
 ## Read-only guarantee
@@ -175,16 +206,24 @@ npm run typecheck
 
 ## Acceptance driver
 
-`tools/acceptance.mjs` runs the full A–K acceptance suite (startup, real
+`tools/acceptance.mjs` runs the full A–Z acceptance suite (startup, real
 processes, process start/stop, network, connection pulses, inspector, event
-drawer, WebSocket recovery, resilience) against a headless Chromium:
+drawer, WebSocket recovery, resilience, telemetry honesty, family view,
+focus, multi-select, tooltips, live traffic, Tier-2 wiring + decay, GPU,
+semantic framework, LM Studio, Hermes, MCP, AI view) against a headless
+Chromium:
 
 ```bash
 # backend + frontend running, then:
-"<path>\brave.exe" --headless=new --remote-debugging-port=9222 `
+"<path>\\brave.exe" --headless=new --remote-debugging-port=9222 `
   --user-data-dir="$env:TEMP\esw-cdp" --remote-allow-origins=* about:blank
 node tools/acceptance.mjs        # exit 0 = all tests passed
 ```
+
+Sections are capability-aware: REAL machine detections (GPU, Hermes) are
+asserted; components that are not running (LM Studio, MCP servers) report
+`SKIPPED` — fixtures are validated by unit tests and never presented as
+real-machine detections.
 
 ## Known limitations
 
@@ -202,10 +241,10 @@ node tools/acceptance.mjs        # exit 0 = all tests passed
 
 ## Roadmap
 
-See [docs/PHASES.md](docs/PHASES.md) — Phases 1–12 functional; Windows
-Services, Docker/WSL, GPU/VRAM telemetry, AI-agent observability (Hermes,
-DeepSeek, LM Studio, MCP servers, tokens/TPS/latency) are designed-for and
-scheduled next.
+See [docs/PHASES.md](docs/PHASES.md) — Phases 1–19 functional (GPU + AI
+semantic observability 14/15/16/18 COMPLETE in v0.3.0); Windows Services,
+Docker/WSL, large-graph optimization and Phase 17 deep AI-agent telemetry
+(tool calls, tokens/TPS/latency) are designed-for and scheduled next.
 
 ## Repository
 

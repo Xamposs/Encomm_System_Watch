@@ -16,6 +16,15 @@ const TYPE_LABEL: Record<EventType, string> = {
   PROCESS_METRICS_UPDATED: 'METRICS',
   TRAFFIC_BURST: 'TRAFFIC BURST',
   TELEMETRY_CAPABILITY_CHANGED: 'TELEMETRY',
+  HERMES_DETECTED: 'HERMES DETECTED',
+  LM_STUDIO_DETECTED: 'LM STUDIO DETECTED',
+  MCP_SERVER_DETECTED: 'MCP SERVER DETECTED',
+  SEMANTIC_DETECTED: 'SEMANTIC DETECTED',
+  SEMANTIC_LOST: 'SEMANTIC LOST',
+  MODEL_LOADED: 'MODEL LOADED',
+  MODEL_AVAILABLE: 'MODEL AVAILABLE',
+  GPU_PROCESS_ATTACHED: 'GPU PROCESS ATTACHED',
+  GPU_PROCESS_DETACHED: 'GPU PROCESS DETACHED',
 }
 
 const TYPE_CLASS: Record<EventType, string> = {
@@ -26,6 +35,15 @@ const TYPE_CLASS: Record<EventType, string> = {
   PROCESS_METRICS_UPDATED: 'ev-metrics',
   TRAFFIC_BURST: 'ev-burst',
   TELEMETRY_CAPABILITY_CHANGED: 'ev-telemetry',
+  HERMES_DETECTED: 'ev-semantic',
+  LM_STUDIO_DETECTED: 'ev-semantic',
+  MCP_SERVER_DETECTED: 'ev-semantic',
+  SEMANTIC_DETECTED: 'ev-semantic',
+  SEMANTIC_LOST: 'ev-semantic-lost',
+  MODEL_LOADED: 'ev-model',
+  MODEL_AVAILABLE: 'ev-model',
+  GPU_PROCESS_ATTACHED: 'ev-gpu',
+  GPU_PROCESS_DETACHED: 'ev-gpu-detach',
 }
 
 function describe(ev: SystemEvent): string {
@@ -43,6 +61,20 @@ function describe(ev: SystemEvent): string {
       return `${m.src_label ?? '?'} → ${m.tgt_label ?? '?'} ${fmtBps(Number(m.rate_bps ?? 0))} (${Math.round(Number(m.bytes ?? 0) / 1024)} KB in ${m.window_ms ?? '?'} ms)`
     case 'TELEMETRY_CAPABILITY_CHANGED':
       return `${m.level ?? '?'} · ${m.source ?? '?'}${m.elevation_required ? ' · ELEVATION REQUIRED' : ''}`
+    case 'HERMES_DETECTED':
+    case 'LM_STUDIO_DETECTED':
+    case 'MCP_SERVER_DETECTED':
+    case 'SEMANTIC_DETECTED':
+      return `${m.semantic_name ?? '?'} · ${m.confidence ?? '?'} · ${(m.detection?.process_ids ?? []).length} underlying proc${(m.detection?.process_ids ?? []).length === 1 ? '' : 's'}`
+    case 'SEMANTIC_LOST':
+      return `${m.semantic_name ?? m.node_id ?? '?'} gone`
+    case 'MODEL_LOADED':
+    case 'MODEL_AVAILABLE':
+      return `${m.semantic_name ?? '?'} → ${m.state ?? '?'}`
+    case 'GPU_PROCESS_ATTACHED':
+      return `${m.name ?? `PID ${m.pid ?? '?'}`} (PID ${m.pid ?? '?'}) → GPU ${m.gpu_index ?? '?'}${typeof m.vram_mb === 'number' ? ` · ${(Number(m.vram_mb) / 1024).toFixed(2)} GB` : ''}`
+    case 'GPU_PROCESS_DETACHED':
+      return `${m.name ?? `PID ${m.pid ?? '?'}`} (PID ${m.pid ?? '?'}) left GPU ${m.gpu_index ?? '?'}`
   }
 }
 

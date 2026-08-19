@@ -1,4 +1,4 @@
-import type { Filter, ViewMode } from '../types/system'
+import type { Filter, SemanticView, ViewMode } from '../types/system'
 
 const FILTERS: { id: Filter; label: string }[] = [
   { id: 'all', label: 'ALL' },
@@ -17,6 +17,8 @@ interface Props {
   onZoomOut: () => void
   viewMode: ViewMode
   onViewMode: (m: ViewMode) => void
+  semanticView: SemanticView
+  onSemanticView: (v: SemanticView) => void
   focusNode: string | null
   focusHops: number
   onFocusHops: (h: number) => void
@@ -27,8 +29,8 @@ interface Props {
 
 export function FilterBar({
   filter, onFilter, search, onSearch, onFit, onZoomIn, onZoomOut,
-  viewMode, onViewMode, focusNode, focusHops, onFocusHops, onFocusExit,
-  selectionCount, onClearSelection,
+  viewMode, onViewMode, semanticView, onSemanticView, focusNode, focusHops,
+  onFocusHops, onFocusExit, selectionCount, onClearSelection,
 }: Props) {
   return (
     <div className="filterbar">
@@ -56,6 +58,21 @@ export function FilterBar({
           onClick={() => onViewMode('families')}
         >
           FAMILIES
+        </button>
+      </div>
+
+      <div className="view-toggle" title="SYSTEM = full machine map · AI = semantic AI subset (Hermes, LM Studio, models, MCP, GPU)">
+        <button
+          className={`pill sem-view ${semanticView === 'system' ? 'active' : ''}`}
+          onClick={() => onSemanticView('system')}
+        >
+          SYSTEM
+        </button>
+        <button
+          className={`pill sem-view ${semanticView === 'ai' ? 'active' : ''}`}
+          onClick={() => onSemanticView('ai')}
+        >
+          AI
         </button>
       </div>
 
@@ -93,7 +110,6 @@ export function FilterBar({
           <button className="fit-btn" onClick={onClearSelection}>CLEAR</button>
         </div>
       )}
-
       <div className="view-controls">
         <button className="icon-btn" title="Zoom out" onClick={onZoomOut}>−</button>
         <button className="icon-btn" title="Zoom in" onClick={onZoomIn}>+</button>

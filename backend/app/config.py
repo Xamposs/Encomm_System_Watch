@@ -32,6 +32,13 @@ class Settings:
     telemetry_flush_ms: float = 200.0      # activity aggregation window
     telemetry_burst_bytes: int = 200_000   # per-edge per-window burst threshold
     telemetry_burst_cooldown_s: float = 10.0
+    # ---- semantic detection (GPU + AI observability, v0.3.0) ---------------
+    detectors_config_path: str = ""        # config/detectors.json (hints only)
+    detector_interval_s: float = 3.0       # process classification cadence
+    lm_studio_api_interval_s: float = 8.0  # local API probe cadence
+    gpu_metrics_interval_s: float = 1.0    # overall GPU metrics
+    gpu_pid_interval_s: float = 2.0        # GPU PID attribution
+    gpu_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -47,4 +54,10 @@ class Settings:
             telemetry_flush_ms=float(os.environ.get("ESW_TELEMETRY_FLUSH_MS", "200")),
             telemetry_burst_bytes=int(os.environ.get("ESW_TELEMETRY_BURST_BYTES", "200000")),
             telemetry_burst_cooldown_s=float(os.environ.get("ESW_TELEMETRY_BURST_COOLDOWN_S", "10")),
+            detectors_config_path=os.environ.get("ESW_DETECTORS_CONFIG", ""),
+            detector_interval_s=float(os.environ.get("ESW_DETECTOR_INTERVAL_S", "3.0")),
+            lm_studio_api_interval_s=float(os.environ.get("ESW_LM_STUDIO_API_INTERVAL_S", "8.0")),
+            gpu_metrics_interval_s=float(os.environ.get("ESW_GPU_METRICS_INTERVAL_S", "1.0")),
+            gpu_pid_interval_s=float(os.environ.get("ESW_GPU_PID_INTERVAL_S", "2.0")),
+            gpu_enabled=_env_bool("ESW_GPU_ENABLED", True),
         )

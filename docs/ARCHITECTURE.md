@@ -9,19 +9,27 @@ WINDOWS 11
 COLLECTORS  (1s tick)
    ├── ProcessCollector  — psutil, stable IDs, TTL-cached metadata
    ├── NetworkCollector  — psutil.net_connections (TCP+UDP), classified
-   └── SystemCollector   — CPU %, RAM, platform info
+   ├── SystemCollector   — CPU %, RAM, platform info
+   └── GpuCollector      — NVML (nvidia-smi fallback), ~1s metrics / ~2s PID map
    ▼
 NORMALIZED SYSTEM STATE (Snapshot)
    ▼
 TOPOLOGY ENGINE
    ▼
+SEMANTIC DETECTOR REGISTRY          (GPU + AI observability, v0.3.0)
+   ├── HermesDetector     — desktop app + gateway, evidence-combination
+   ├── LmStudioDetector   — process identity + localhost API probe
+   └── McpDetector        — cmdline/path/ancestry (stdio + HTTP/SSE)
+   ▼
+SEMANTIC ENGINE           (evidence + confidence -> semantic resource nodes
+   ▼                      -> relationships -> change-only events)
 DIFF / EVENT ENGINE
    ▼
 FASTAPI + WEBSOCKET  (127.0.0.1:8765)
    ▼
 FRONTEND STATE  (React hook + imperative graph controller)
    ▼
-CYTOSCAPE GRAPH  (canvas pulse overlay on top)
+CYTOSCAPE GRAPH  (SYSTEM / AI view · canvas pulse overlay on top)
 ```
 
 Network activity (v0.2) plugs into the same pipeline — the v0.2.2 runtime
@@ -97,6 +105,7 @@ observation and must never be presented as one.
 | `processes.py` | pid, name, exe, username, status, CPU %, RAM, threads, ppid, start time, cmdline | Stable id `proc:<pid>:<create_time_ms>` guards against PID reuse. Per-field try/except — a single inaccessible/vanishing process never crashes the tick. psutil caches `name/create_time/exe/username/ppid` per Process object; `status/num_threads/cmdline` are TTL-cached (60 s) here; `memory_info + cpu_times` are fetched every tick in one batched `as_dict()` call (~0.6 s for ~300 processes — measured; psutil does not parallelize across threads on Windows, so no thread pool). |
 | `network.py` | TCP/UDP sockets: pid, local/remote addr, state | Classified `listening` (no remote end), `localhost` (both ends loopback), `external`. `pid=None` sockets (elevated/system) map to the SYSTEM node. AccessDenied falls back to per-family enumeration. |
 | `system.py` | machine CPU %, RAM used/total, hostname, platform, boot time | One cheap call set per tick. |
+| `gpu.py` | GPU index, name, utilization, VRAM used/total, temperature, power, driver, fan, clocks, per-PID attribution | Primary source NVML (`pynvml`/`nvidia-ml-py`, C-level, no subprocess); `nvidia-smi` CSV parsing is the fallback when NVML is unavailable. Multiple GPUs supported; unavailable fields are omitted, never fabricated; every failure degrades to an empty sample — the collector can never crash SYSTEM WATCH. |
 | `demo.py` | synthetic data | **Only** active when `ESW_DEMO_MODE=1`. Every snapshot built from it is flagged `mode=demo`; the UI shows a DEMO badge. |
 
 ### 2. Normalized state (`models/entities.py`)
@@ -216,9 +225,14 @@ explicit direction. Documented, not used.
   received/drained/dropped + queue depth, aggregator recorded/mapped/
   unattributed/batches, last batch's directional bytes. Counts only, never
   payloads; localhost-only like everything else.
+- `GET /api/gpu` — current GPU state: source (`NVML` / `NVIDIA_SMI` / `NONE`),
+  error (if degraded), per-GPU metrics + PID attribution.
+- `GET /api/semantic` — current semantic detections (type, name, confidence,
+  evidence, underlying pids), relationships, summary, per-detector errors.
 - `WS /ws` — on connect: full snapshot (once). Then: event batches (≤100),
-  `network_activity` batches (≤ ~5/s), stats every 2 s (with `net` block +
-  telemetry info), heartbeat ping. No periodic full re-transmission.
+  `network_activity` batches (≤ ~5/s), `gpu` state (~1/s), stats every 2 s
+  (with `net` block + telemetry info), heartbeat ping. No periodic full
+  re-transmission.
 - The telemetry runtime loop (`_telemetry_loop`) calls `_telemetry_tick()`
   every ~200 ms: `provider.drain() → aggregator.record_many() →
   aggregator.flush()`. Provider and health-probe failures are caught — a
@@ -279,6 +293,27 @@ explicit direction. Documented, not used.
 - Layout: fcose, `randomize` once on connect; incremental passes with
   `fit: false` afterwards so the user's viewport never jumps. New nodes are
   placed near a known neighbor when the event carries one.
+- **SYSTEM / AI view toggle** (`setSemanticView`): the AI view is driven by
+  semantic classification, never frontend string search — semantic resource
+  nodes (SEMANTIC / LOCAL_LLM / GPU), backend-classified processes
+  (`data.semantic`) and GPU-attributed processes stay; everything else gets
+  the `ai-dim` class. The toggle only adds/removes a class: the Cytoscape
+  instance, layout, positions, selection and focus are all preserved.
+- Semantic nodes (compact, control-room style): `◈ HERMES ● RUNNING · PID`,
+  `◉ LM STUDIO <endpoint>`, `MCP SERVER <identity>`, `LOCAL LLM <model>`,
+  `GPU <index> <name> <util% · VRAM>`. Strong styling only for
+  HIGH/CONFIRMED; MEDIUM/LOW stay subdued (dashed borders).
+- Semantic edges are styled per kind (`USES_GPU` green dashed, `SERVES_MODEL`
+  purple, `LOCAL_API`/`HOSTS` cyan dashed, `PROCESS_PARENT`/`SPAWNED`/
+  `MEMBER_OF` dotted gray/violet). They never receive DATA particles — the
+  pulse overlay only keys real socket edges from `network_activity` batches.
+- Header AI summary (`AiSummary`): compact chips — `HERMES ●`, `LM STUDIO ●`,
+  `MODEL ● <id>` (LOADED) / `MODEL <id>` (AVAILABLE), `MCP n`, `GPU <util% ·
+  VRAM>` — rendered only for categories actually detected.
+- Inspector semantic section: SEMANTIC IDENTITY (name, confidence badge,
+  evidence list, underlying PIDs, endpoint/transport/state), GPU metrics
+  (utilization, VRAM, temperature, power, driver, per-PID attribution),
+  model state + metadata source.
 
 ### 8. Performance model
 
@@ -292,22 +327,130 @@ explicit direction. Documented, not used.
 - Pulse overlay draws only active edges (capped 30 pulses + 140 particles +
   80 recents); the rAF loop stops entirely when idle.
 
-## Future AI-agent telemetry
+## 9. GPU + AI semantic observability (v0.3.0)
 
-The topology schema already accommodates new node kinds
-(`AI_AGENT`, `LLM`, `MCP_SERVER`, `DATABASE`, `WATCHER`, `QUEUE`, `API`,
-`GPU`, `WINDOWS_SERVICE`, `DOCKER_CONTAINER`, `WSL_PROCESS`). Planned
-integration points:
+Raw process truth is always preserved underneath the semantic layer — the
+semantic pipeline is purely additive (its own node/edge ids, its own events).
 
-1. **Collectors** — new collectors (e.g. `ai_telemetry.py`) publish
-   `AgentInfo`/`LLMRequest` records into the same `Snapshot`-shaped state.
-2. **Topology engine** — kind-agnostic already; agent/LLM nodes get edges
-   when evidence exists (e.g. Hermes → DeepSeek via its HTTP client socket,
-   Hermes → LM Studio via the mapped localhost pair, MCP server sockets).
-3. **Diff engine** — new event types (e.g. `TOOL_CALL`, `AGENT_MESSAGE`,
-   `LLM_REQUEST`) follow the same lifecycle pattern.
-4. **Frontend** — node-kind styles are selector-driven; adding a kind is a
-   stylesheet entry, not a code change.
+```
+WINDOWS RAW STATE
+       ↓
+PROCESS / SOCKET TOPOLOGY
+       ↓
+SEMANTIC DETECTOR REGISTRY            (backend/app/detectors/)
+       ├── HermesDetector     — Phase 15
+       ├── LmStudioDetector   — Phase 14
+       └── McpDetector        — Phase 16
+       ↓
+EVIDENCE + CONFIDENCE        (CONFIRMED / HIGH / MEDIUM / LOW)
+       ↓
+SEMANTIC RESOURCE NODES      (SEMANTIC · LOCAL_LLM · GPU — ids sem:*, gpu:*)
+       ↓
+RELATIONSHIPS                (USES_GPU · SERVES_MODEL · LOCAL_API ·
+                              PROCESS_PARENT · SPAWNED · HOSTS · MEMBER_OF)
+       ↓
+WEBSOCKET                    (snapshot merge + change-only semantic events)
+       ↓
+SYSTEM / AI VIEW             (frontend classification-driven dimming)
 
-No AI-layer code ships in this phase; the design above is the seam where it
-will attach.
+GPU path:
+NVML (pynvml) ── nvidia-smi CSV fallback
+       ↓
+GPU COLLECTOR                (~1 s metrics / ~2 s PID attribution)
+       ↓
+GPU RESOURCE NODE            (gpu:<index> — name, util, VRAM, temp, power…)
+       ↓
+PID ATTRIBUTION              (NVML compute+graphics process lists)
+       ↓
+USES_GPU edges               (process sid → gpu:<index>, evidence-backed)
+```
+
+### Detector framework (`backend/app/detectors/`)
+
+- `base.py` — `Detection` (WHAT / WHICH / WHY / HOW CONFIDENT / WHAT
+  EVIDENCE), `DetectionEvidence` (machine-readable source + sanitized
+  detail), `SemanticRelationship` (stable `se:*` ids, canonical undirected
+  ordering), `DetectorContext` (snapshot + topology + GPU state + pid→sid).
+  Confidence mapping: a weak guess is never a fact — hint-only matches are
+  LOW, bare process names MEDIUM, known-path identity or live API response
+  HIGH, and only a direct runtime observation (API answer / exact known
+  path) may be CONFIRMED.
+- `registry.py` — `SemanticDetectorRegistry.run_all()`: per-detector
+  failure isolation (one broken detector degrades only itself; errors are
+  surfaced via `/api/semantic`), hints loader for `config/detectors.json`
+  (hints only — never secrets; missing/broken file falls back to built-in
+  defaults).
+- `redact.py` — command-line secret redaction applied at the serialization
+  boundary (topology node data, diff-event metadata) and inside detectors:
+  `--api-key/--token/--password/--secret/--auth*` flags, `key=value` forms,
+  `Authorization: Bearer <token>`. Credential values never reach the
+  frontend or logs; the raw collector snapshot stays untouched.
+
+### Detectors (strict evidence rules)
+
+- **Hermes** (`hermes.py`) — CONFIRMED only via known executable path
+  (`…hermes-agent\…\Hermes.exe`) or gateway command line
+  (`hermes_cli.main … serve` inside the hermes-agent venv); family members
+  (Electron children, gateway uv-shims) join only with their own Hermes
+  identity signal — never by ancestry alone (a Hermes-spawned session tree
+  must not absorb bash/curl/other children). Emits `MEMBER_OF`,
+  real `PROCESS_PARENT`, and `HOSTS` (gateway localhost listeners).
+- **LM Studio** (`lm_studio.py`) — candidate ports come from the REAL
+  socket topology (owned listeners), never a blind port-1234 assumption
+  (hint ports are secondary). Loopback-only API probes (`/v1/models` +
+  `/api/0/models`) with short timeouts, throttled (~8 s) and cached.
+  `LOADED` is claimed ONLY when the runtime API proves it; a `/v1/models`
+  listing proves `AVAILABLE` only. Model metadata (architecture,
+  quantization) is exposed only when the API exposes it; filename-derived
+  values would be marked `FILENAME INFERENCE` with LOW confidence.
+- **MCP** (`mcp.py`) — networking alone is insufficient (stdio servers have
+  no sockets). Evidence: anchored `mcp` tokens in the command line, package
+  paths (`node_modules/@modelcontextprotocol`, `mcp-server`, `mcp_server`),
+  parent/child ancestry (Hermes gateway launcher), owned listeners for
+  HTTP/SSE. Identity: `filesystem`, `github`, … when proven; `unknown`
+  when MCP is proven but the server is not — never a guess. stdio servers
+  get `PROCESS_PARENT` + `SPAWNED` edges (real ancestry), never fake
+  network edges and never DATA particles.
+
+### GPU collector (`backend/app/collectors/gpu.py`)
+
+- Primary: NVML via `pynvml` (the `nvidia-ml-py` package) — C-level calls,
+  no subprocess churn. Fallback: `nvidia-smi --query-gpu=…` CSV parsing.
+  Multiple GPUs from the start (`gpu:<index>` nodes).
+- Only fields actually exposed are emitted; unavailable = omitted.
+  Per-process VRAM only when the API really provides it (NVML graphics
+  contexts often report none — that stays `n/a`, never fabricated).
+- Cadence: overall metrics ~1 s, PID attribution ~2 s (main.py `_gpu_loop`,
+  failure-isolated). `changed_pids()` diffs per-GPU pid sets so
+  `GPU_PROCESS_ATTACHED` / `GPU_PROCESS_DETACHED` events fire on change
+  only (first sample establishes the baseline — no startup storm).
+
+### Semantic engine (`backend/app/services/semantic.py`)
+
+- Builds semantic nodes (`SEMANTIC`/`LOCAL_LLM`/`GPU` kinds) and semantic
+  edges (`se:*` ids) merged into every snapshot; augments underlying
+  process nodes with `data.semantic` so the AI view is classification-
+  driven. Raw topology objects are never mutated.
+- Change-only events: `HERMES_DETECTED`, `LM_STUDIO_DETECTED`,
+  `MCP_SERVER_DETECTED`, `SEMANTIC_LOST`, `MODEL_LOADED`, `MODEL_AVAILABLE`
+  (flips only; a new LOCAL_LLM is announced once, not twice), and
+  `GPU_PROCESS_ATTACHED`/`GPU_PROCESS_DETACHED` (owned by the GPU loop at
+  its 2 s cadence). Repeated unchanged detections never re-emit.
+
+### Truthfulness invariants
+
+- `unknown` stays unknown; MEDIUM/LOW classifications get subdued styling.
+- `LOADED` ≠ `AVAILABLE`; adapter totals ≠ captured bytes; NVML ≠ nvidia-smi
+  (the source is always labeled).
+- Command lines are redacted before they can reach the UI; detectors only
+  consume sanitized metadata.
+- One failed detector (NVML missing, API timeout, parser exception) degrades
+  only that detector — core monitoring continues.
+
+## Future AI-agent telemetry (Phase 17 — NOT STARTED)
+
+The schema already accommodates the next layer. The v0.3.0 semantic layer
+ships the seams: detector registry, evidence model, semantic nodes/edges,
+change-only events, AI view. Deep agent telemetry (tool calls, tokens, TPS,
+context usage, latency, reasoning) is intentionally NOT fabricated — it
+waits for a real existing interface to expose it.

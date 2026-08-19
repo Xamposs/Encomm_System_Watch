@@ -2,6 +2,130 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.3.0] — 2026-08-19
+
+GPU + AI semantic observability checkpoint (Phases 14/15/16/18 COMPLETE,
+Phase 17 stays NOT STARTED — seams only, never fabricated telemetry).
+
+### Added — semantic detector framework (`backend/app/detectors/`)
+
+- **`base.py`** — `Detection` (semantic type/name, confidence, underlying
+  process ids, evidence list), `DetectionEvidence` (machine-readable source
+  + sanitized detail), `SemanticRelationship` (stable `se:*` ids),
+  `DetectorContext`. Confidence levels CONFIRMED/HIGH/MEDIUM/LOW — a weak
+  guess is never a fact (hint-only = LOW, bare name = MEDIUM, known-path or
+  live API = HIGH, direct runtime proof = CONFIRMED).
+- **`registry.py`** — `SemanticDetectorRegistry`: per-detector failure
+  isolation (one broken detector degrades only itself; errors surfaced via
+  `/api/semantic`), hints loader for `config/detectors.json` (hints only —
+  never secrets; broken file falls back to built-in defaults).
+- **`redact.py`** — command-line secret redaction (`--api-key`, `--token`,
+  `--password`, `--secret`, `--auth*`, `key=value` forms,
+  `Authorization: Bearer …`) applied at the serialization boundary
+  (topology node data, diff-event metadata) and inside detectors — credential
+  values never reach the frontend or logs.
+
+### Added — detectors
+
+- **Phase 14 — LM Studio** (`lm_studio.py`): evidence-based detection via
+  process identity + REAL socket-topology port discovery (never a blind
+  port-1234 assumption; hint ports secondary). Loopback-only API probes
+  (`/v1/models` + runtime `/api/0/models`), 0.5 s timeouts, ~8 s throttle,
+  cached. Strict truthfulness: `LOADED` only when the runtime API proves
+  it, `AVAILABLE` for `/v1/models` listings. CONFIRMED only via known path
+  or live API. Emits `SERVES_MODEL` (LOCAL_LLM model nodes), `LOCAL_API`,
+  `HOSTS` edges.
+- **Phase 15 — Hermes** (`hermes.py`): evidence combination — exact
+  executable path (`…hermes-agent\…\Hermes.exe`), Electron child
+  relationships, `hermes_cli.main … serve` gateway command lines inside the
+  hermes-agent venv. Family membership is identity-gated (a descendant
+  joins only with its own Hermes signal — a Hermes-spawned session tree
+  never absorbs unrelated children). Emits `MEMBER_OF`, real
+  `PROCESS_PARENT`, `HOSTS` (gateway localhost listeners).
+- **Phase 16 — MCP** (`mcp.py`): networking alone is insufficient — anchored
+  `mcp` cmdline tokens, package paths
+  (`node_modules/@modelcontextprotocol`, `mcp-server`, `mcp_server`),
+  parent/child ancestry (Hermes gateway launcher), owned listeners for
+  HTTP/SSE. Identity proven → named server; proven-but-unidentified →
+  `unknown` (never a guess). stdio servers get `PROCESS_PARENT` + `SPAWNED`
+  (real ancestry) — never fake network edges, never DATA particles.
+
+### Added — GPU / VRAM (Phase 18, `backend/app/collectors/gpu.py`)
+
+- NVML primary (`nvidia-ml-py`/pynvml — C-level, no subprocess churn);
+  `nvidia-smi` CSV fallback when NVML is unavailable. Multi-GPU from the
+  start (`gpu:<index>` resource nodes).
+- Metrics ~1 s (utilization, VRAM used/total, temperature, power, driver,
+  fan, clocks), PID attribution ~2 s (NVML compute + graphics process
+  lists; per-process VRAM only when the API really provides it).
+- Unavailable fields are omitted, never fabricated; the collector can never
+  crash SYSTEM WATCH.
+- `GPU_PROCESS_ATTACHED` / `GPU_PROCESS_DETACHED` change-only events
+  (baseline established on first sample — no startup storm) + `USES_GPU`
+  edges from PID attribution.
+
+### Added — semantic engine (`backend/app/services/semantic.py`)
+
+- Semantic resource nodes (SEMANTIC / LOCAL_LLM / GPU) and edges merged
+  into every snapshot (purely additive — raw topology untouched, no
+  duplicate/orphan semantic elements). Process nodes get `data.semantic`
+  augmentation so the AI view is classification-driven.
+- Change-only events: `HERMES_DETECTED`, `LM_STUDIO_DETECTED`,
+  `MCP_SERVER_DETECTED`, `SEMANTIC_LOST`, `MODEL_LOADED`, `MODEL_AVAILABLE`,
+  `GPU_PROCESS_ATTACHED`/`GPU_PROCESS_DETACHED`.
+- New read-only endpoints: `GET /api/gpu`, `GET /api/semantic`. New `gpu`
+  WebSocket message (~1 s live metrics). Stats now carry compact `gpu` +
+  `semantic` summaries for the header.
+
+### Added — frontend (AI view)
+
+- **SYSTEM / AI view toggle** in the filter bar — classification-driven
+  dimming (`ai-dim`), never string search; no Cytoscape recreation, graph
+  state (positions, selection, focus) preserved.
+- Semantic node styles (compact control-room cards: `◈ HERMES`, `◉ LM
+  STUDIO`, `MCP SERVER`, `LOCAL LLM`, `GPU`) — strong styling only for
+  HIGH/CONFIRMED; MEDIUM/LOW subdued. Semantic edge styles per kind;
+  semantic edges never receive DATA particles.
+- Inspector: SEMANTIC IDENTITY section (name, confidence badge, evidence,
+  underlying PIDs, endpoint/transport/state), GPU metrics section
+  (utilization, VRAM, temperature, power, driver, per-PID attribution),
+  model state.
+- Header AI summary chips (only detected categories), event drawer rows for
+  all semantic events, legend entries for semantic nodes/edges.
+
+### Security
+
+- Command-line secret redaction (see `redact.py` above) — verified by
+  unit tests (`tests/test_security_redaction.py`).
+- Read-only preserved: no kill/stop/load/execute paths added anywhere;
+  GPU/LM Studio/MCP/Hermes are observe-only.
+
+### Tests
+
+- Backend: 101 → **147 passed / 0 failed** (new: GPU collector — no-NVML
+  degradation, single/multi GPU, metrics, PID mapping, stale PID removal,
+  nvidia-smi parser; detector framework — serialization, confidence,
+  failure isolation, hints; LM Studio — confirmed/API-failure/false
+  positive/loaded-vs-available; Hermes — strong/ambiguous/hint-assisted/
+  listener; MCP — ancestry/stdio/HTTP/false positive; semantic engine —
+  change-only events, lost detections, model flips, USES_GPU edges, process
+  augmentation; security redaction).
+- Frontend: `npm run typecheck` + `npm run build` PASS.
+- Acceptance: extended with Tests **U** (GPU), **V** (semantic framework),
+  **W** (LM Studio), **X** (Hermes), **Y** (MCP), **Z** (AI view) —
+  capability-aware (REAL / SKIPPED, never fixture-as-real).
+
+### Real-machine validation (this machine)
+
+- **GPU**: NVML source — NVIDIA GeForce GTX 1660 Ti, real utilization,
+  VRAM used/total, temperature, power, driver, 20 attributed PIDs.
+- **Hermes**: CONFIRMED — 9 real processes (desktop main + Electron
+  children + 2 gateway profiles), evidence-backed, zero false positives.
+- **LM Studio**: not running — detector unit-tested, real test SKIPPED
+  (never auto-launched).
+- **MCP**: no servers running — stdio/HTTP cases covered by fixture unit
+  tests, real test SKIPPED.
+
 ## [0.2.3] — 2026-08-19
 
 Final real-ETW runtime validation checkpoint (Phase 19 stays COMPLETE — every

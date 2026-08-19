@@ -36,6 +36,9 @@ export function useSystemWatch() {
             setTelemetry(msg.telemetry)
             controllerRef.current?.setTelemetry(msg.telemetry)
           }
+          if (msg.gpu?.length) {
+            controllerRef.current?.applyGpu(msg.gpu)
+          }
           controllerRef.current?.replaceAll(msg.nodes, msg.edges)
           break
         case 'events': {
@@ -67,6 +70,9 @@ export function useSystemWatch() {
           break
         case 'network_activity':
           controllerRef.current?.applyActivity(msg.items, msg.nodes)
+          break
+        case 'gpu':
+          controllerRef.current?.applyGpu(msg.data)
           break
       }
     }, setStatus)

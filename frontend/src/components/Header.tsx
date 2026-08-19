@@ -1,4 +1,4 @@
-import type { ConnectionStatus, Stats, TelemetryInfo } from '../types/system'
+import type { ConnectionStatus, SemanticSummary, Stats, TelemetryInfo } from '../types/system'
 import { fmtBps } from '../graph/GraphController'
 
 interface Props {
@@ -20,6 +20,46 @@ function telemetryLabel(t: TelemetryInfo | null): { text: string; cls: string } 
   return { text: 'TRAFFIC: SOCKET EVENTS', cls: 'tel-t0' }
 }
 
+/** Compact AI status row — only categories actually detected appear. */
+export function AiSummary({ semantic }: { semantic?: SemanticSummary }) {
+  if (!semantic) return null
+  const chips: { text: string; cls: string; title: string }[] = []
+  if (semantic.hermes) chips.push({ text: 'HERMES ●', cls: 'ai-hermes', title: 'Hermes agent running' })
+  if (semantic.lm_studio) chips.push({ text: 'LM STUDIO ●', cls: 'ai-lm', title: 'LM Studio running' })
+  for (const m of semantic.models) {
+    chips.push({
+      text: m.state === 'LOADED' ? `MODEL ● ${m.id}` : `MODEL ${m.id}`,
+      cls: m.state === 'LOADED' ? 'ai-model-loaded' : 'ai-model',
+      title: `${m.id} (${m.state})`,
+    })
+  }
+  if (semantic.mcp.length) {
+    chips.push({ text: `MCP ${semantic.mcp.length}`, cls: 'ai-mcp', title: semantic.mcp.join(', ') })
+  }
+  for (const g of semantic.gpu) {
+    const util = typeof g.utilization_percent === 'number' ? `${Math.round(g.utilization_percent)}%` : '—'
+    const vram =
+      typeof g.vram_used_mb === 'number' && typeof g.vram_total_mb === 'number'
+        ? `${(g.vram_used_mb / 1024).toFixed(1)}/${(g.vram_total_mb / 1024).toFixed(1)} GB`
+        : null
+    chips.push({
+      text: `GPU ${vram ? `${util} · ${vram}` : util}`,
+      cls: 'ai-gpu',
+      title: `${g.name ?? 'GPU'} · ${util}${typeof g.temperature_c === 'number' ? ` · ${g.temperature_c}°C` : ''}`,
+    })
+  }
+  if (chips.length === 0) return null
+  return (
+    <div className="ai-summary" title="AI semantic summary — only real detections">
+      {chips.map((c, i) => (
+        <span key={i} className={`ai-chip ${c.cls}`} title={c.title}>
+          {c.text}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
   const feed = feedTs
     ? new Date(feedTs * 1000).toLocaleTimeString('en-GB', { hour12: false })
@@ -38,6 +78,8 @@ export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
         </div>
         <div className="brand-sub">LIVE READ-ONLY SYSTEM MAP</div>
       </div>
+
+      <AiSummary semantic={stats?.semantic} />
 
       <div className="header-right">
         {mode === 'demo' && <div className="demo-badge">DEMO MODE</div>}

@@ -18,6 +18,7 @@ import time
 from collections import defaultdict
 
 from ..config import Settings
+from ..detectors.redact import redact_cmdline
 from ..models.entities import ConnectionInfo, Snapshot, Stats, TEdge, TNode, TopologyResult
 
 SYSTEM_NODE_ID = "sys:windows"
@@ -109,7 +110,7 @@ class TopologyEngine:
                     "ppid": p.ppid,
                     "parent_sid": pid_to_sid.get(p.ppid) if p.ppid is not None else None,
                     "created": p.create_time,
-                    "cmdline": p.cmdline,
+                    "cmdline": redact_cmdline(p.cmdline),
                     "conn_count": 0,
                     "listening_ports": [],
                 },

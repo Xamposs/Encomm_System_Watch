@@ -1,0 +1,25 @@
+{
+  "comment": "Detector hints only. NEVER store passwords, API keys, or tokens here. These hints help future runtime versions without code changes.",
+  "hermes": {
+    "process_patterns": ["Hermes.exe", "hermes.exe"],
+    "path_patterns": ["hermes-agent"],
+    "cmdline_patterns": ["hermes_cli.main"],
+    "known_ports": []
+  },
+  "lm_studio": {
+    "process_patterns": ["LM Studio.exe", "LM Studio"],
+    "path_patterns": ["LM Studio"],
+    "default_ports": [1234]
+  },
+  "mcp": {
+    "cmdline_patterns": ["mcp"],
+    "path_patterns": [
+      "node_modules/@modelcontextprotocol",
+      "mcp-server",
+      "mcp_server",
+      "\\mcp\\"
+    ],
+    "launcher_patterns": ["hermes_cli.main", "hermes", "@modelcontextprotocol"],
+    "package_patterns": ["@modelcontextprotocol", "mcp-"]
+  }
+}

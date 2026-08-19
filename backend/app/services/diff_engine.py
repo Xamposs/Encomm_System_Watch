@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Optional
 
 from ..config import Settings
+from ..detectors.redact import redact_cmdline
 from ..models.entities import Event, Snapshot, TopologyResult
 from .topology import SYSTEM_NODE_ID
 
@@ -72,7 +73,10 @@ class DiffEngine:
                 target=None,
                 timestamp=ts,
                 metadata={
-                    "node": node.to_dict() if node else {"id": sid, "kind": "PROCESS", "label": p.name, "data": p.to_dict()},
+                    "node": node.to_dict() if node else {
+                        "id": sid, "kind": "PROCESS", "label": p.name,
+                        "data": {**p.to_dict(), "cmdline": redact_cmdline(p.cmdline)},
+                    },
                     "pid": p.pid,
                     "name": p.name,
                 },

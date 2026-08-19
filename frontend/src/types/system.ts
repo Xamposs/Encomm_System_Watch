@@ -1,5 +1,23 @@
-export type NodeKind = 'PROCESS' | 'SYSTEM' | 'EXTERNAL_ENDPOINT' | 'LISTENING_PORT' | 'LOCAL_ENDPOINT'
-export type EdgeKind = 'LOCALHOST' | 'EXTERNAL' | 'LISTEN'
+export type NodeKind =
+  | 'PROCESS'
+  | 'SYSTEM'
+  | 'EXTERNAL_ENDPOINT'
+  | 'LISTENING_PORT'
+  | 'LOCAL_ENDPOINT'
+  | 'SEMANTIC'
+  | 'LOCAL_LLM'
+  | 'GPU'
+export type EdgeKind =
+  | 'LOCALHOST'
+  | 'EXTERNAL'
+  | 'LISTEN'
+  | 'USES_GPU'
+  | 'SERVES_MODEL'
+  | 'LOCAL_API'
+  | 'PROCESS_PARENT'
+  | 'SPAWNED'
+  | 'HOSTS'
+  | 'MEMBER_OF'
 export type EventType =
   | 'PROCESS_STARTED'
   | 'PROCESS_STOPPED'
@@ -8,9 +26,19 @@ export type EventType =
   | 'PROCESS_METRICS_UPDATED'
   | 'TRAFFIC_BURST'
   | 'TELEMETRY_CAPABILITY_CHANGED'
+  | 'HERMES_DETECTED'
+  | 'LM_STUDIO_DETECTED'
+  | 'MCP_SERVER_DETECTED'
+  | 'SEMANTIC_DETECTED'
+  | 'SEMANTIC_LOST'
+  | 'MODEL_LOADED'
+  | 'MODEL_AVAILABLE'
+  | 'GPU_PROCESS_ATTACHED'
+  | 'GPU_PROCESS_DETACHED'
 export type Filter = 'all' | 'active' | 'listening' | 'highcpu'
 export type ConnectionStatus = 'connecting' | 'live' | 'disconnected'
 export type ViewMode = 'nodes' | 'families'
+export type SemanticView = 'system' | 'ai'
 
 export interface TopoNode {
   id: string
@@ -47,6 +75,34 @@ export interface NetStats {
   adapter_up_bps: number
 }
 
+export interface GpuProcessInfo {
+  pid: number
+  vram_mb?: number
+}
+
+export interface GpuInfo {
+  index: number
+  name?: string
+  utilization_percent?: number
+  vram_used_mb?: number
+  vram_total_mb?: number
+  temperature_c?: number
+  power_w?: number
+  driver?: string
+  fan_percent?: number
+  clock_graphics_mhz?: number
+  clock_memory_mhz?: number
+  processes?: GpuProcessInfo[]
+}
+
+export interface SemanticSummary {
+  hermes: boolean
+  lm_studio: boolean
+  models: { id: string; state: string }[]
+  mcp: string[]
+  gpu: GpuInfo[]
+}
+
 export interface Stats {
   processes: number
   active_conns: number
@@ -57,6 +113,8 @@ export interface Stats {
   mode?: 'live' | 'demo'
   telemetry?: TelemetryInfo
   net?: NetStats | null
+  gpu?: GpuInfo[]
+  semantic?: SemanticSummary
 }
 
 export interface SystemEvent {
@@ -98,6 +156,8 @@ export type ServerMessage =
       telemetry?: TelemetryInfo
       nodes: TopoNode[]
       edges: TopoEdge[]
+      gpu?: GpuInfo[]
+      semantic?: SemanticSummary
     }
   | { type: 'events'; data: SystemEvent[] }
   | { type: 'stats'; data: Stats }
@@ -108,4 +168,5 @@ export type ServerMessage =
       items: NetworkActivityItem[]
       nodes: NetworkActivityNode[]
     }
+  | { type: 'gpu'; data: GpuInfo[]; ts: number }
   | { type: 'ping'; ts: number }

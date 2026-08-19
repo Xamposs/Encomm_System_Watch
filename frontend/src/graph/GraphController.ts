@@ -9,6 +9,7 @@ import cytoscape, {
 import fcose from 'cytoscape-fcose'
 import type {
   Filter,
+  GpuInfo,
   NetworkActivityItem,
   NetworkActivityNode,
   SystemEvent,
@@ -81,6 +82,37 @@ export const STYLESHEET: StylesheetStyle[] = [
       'border-color': '#72809f', color: '#aab4cf', 'font-size': 8,
     },
   },
+  // ---- semantic nodes (GPU + AI observability, v0.3.0) --------------------
+  // strong styling only for HIGH/CONFIRMED; MEDIUM/LOW stay subdued
+  {
+    selector: 'node[kind = "SEMANTIC"]',
+    style: {
+      shape: 'round-rectangle', width: 150, height: 50, 'background-color': '#231a3d',
+      'border-color': '#8b5cf6', 'border-width': 1.8, color: '#d8c9ff',
+      'border-style': 'double', 'font-size': 8.5,
+    },
+  },
+  {
+    selector: 'node[kind = "SEMANTIC"][confidence = "MEDIUM"], node[kind = "SEMANTIC"][confidence = "LOW"]',
+    style: {
+      'border-width': 1, 'border-style': 'dashed', 'background-color': '#191a2e',
+      'border-color': '#6d5c9e', color: '#a99ac9', opacity: 0.85,
+    },
+  },
+  {
+    selector: 'node[kind = "LOCAL_LLM"]',
+    style: {
+      shape: 'round-rectangle', width: 140, height: 42, 'background-color': '#10273a',
+      'border-color': '#38bdf8', 'border-width': 1.4, color: '#a5e3ff', 'font-size': 8.5,
+    },
+  },
+  {
+    selector: 'node[kind = "GPU"]',
+    style: {
+      shape: 'round-rectangle', width: 150, height: 56, 'background-color': '#12251f',
+      'border-color': '#34d399', 'border-width': 1.8, color: '#a7f3d0', 'font-size': 8.5,
+    },
+  },
   // family (process tree) nodes — same visual language, distinct border
   {
     selector: 'node[?family]',
@@ -138,6 +170,14 @@ export const STYLESHEET: StylesheetStyle[] = [
   },
   { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#468aa3', 'target-arrow-shape': 'none' } },
   { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#578a52', 'target-arrow-shape': 'none', 'line-style': 'dashed' } },
+  // ---- semantic edges (v0.3.0) -------------------------------------------
+  { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#34d399', 'target-arrow-color': '#34d399', 'line-style': 'dashed', width: 1.6 } },
+  { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', width: 1.6 } },
+  { selector: 'edge[kind = "LOCAL_API"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed' } },
+  { selector: 'edge[kind = "HOSTS"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 0.9 } },
+  { selector: 'edge[kind = "PROCESS_PARENT"]', style: { 'line-color': '#7c8aa5', 'target-arrow-color': '#7c8aa5', 'line-style': 'dotted' } },
+  { selector: 'edge[kind = "SPAWNED"]', style: { 'line-color': '#a78bfa', 'target-arrow-color': '#a78bfa', 'line-style': 'dotted' } },
+  { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#5f7fa8', 'target-arrow-color': '#5f7fa8', 'line-style': 'dotted', width: 0.8 } },
   { selector: 'edge[?active]', style: { 'line-color': '#4a7fa0', 'target-arrow-color': '#4a7fa0' } },
   { selector: 'edge[?recent]', style: { 'line-color': '#5599b4', 'target-arrow-color': '#5599b4' } },
   // real observed traffic subtly brightens + thickens the edge; decays back
@@ -155,6 +195,23 @@ function portLabel(ports: number[]): string {
   const uniq = [...new Set(ports)].sort((a, b) => a - b)
   const head = uniq.slice(0, 4).join(', ')
   return uniq.length > 4 ? `${head} +${uniq.length - 4}` : head
+}
+
+export function gpuLabel(g: GpuInfo): string {
+  const parts = [`GPU ${g.index}`, String(g.name ?? 'GPU')]
+  const util = g.utilization_percent
+  const used = g.vram_used_mb
+  const total = g.vram_total_mb
+  if (typeof util === 'number') {
+    if (typeof used === 'number' && typeof total === 'number') {
+      parts.push(`${Math.round(util)}% · ${(used / 1024).toFixed(1)}/${(total / 1024).toFixed(1)} GB`)
+    } else {
+      parts.push(`${Math.round(util)}%`)
+    }
+  } else if (typeof used === 'number' && typeof total === 'number') {
+    parts.push(`${(used / 1024).toFixed(1)}/${(total / 1024).toFixed(1)} GB`)
+  }
+  return parts.join('\n')
 }
 
 interface EdgeActivityState {
@@ -192,6 +249,7 @@ export class GraphController {
   private labelDirty = true
   private labelsVisible = true
   private compactMode = false
+  private aiView = false
 
   constructor(
     private cy: Core,
@@ -223,6 +281,90 @@ export class GraphController {
   setTelemetry(t: TelemetryInfo | undefined): void {
     this.telemetrySource =
       t?.source && t.source !== 'NONE' ? t.source : 'SOCKET EVENTS (TIER 0)'
+  }
+
+  // -------------------------------------------------------- semantic / AI view
+
+  /**
+   * SYSTEM <-> AI view toggle. The AI view is driven by SEMANTIC
+   * CLASSIFICATION (node kind + backend `semantic`/`gpu_attributed` data),
+   * never by frontend string search: semantic resource nodes (SEMANTIC /
+   * LOCAL_LLM / GPU), processes the backend classified (data.semantic) and
+   * GPU-attributed processes stay; unrelated Windows noise dims. Graph
+   * state (positions, selection, focus) is preserved — nothing is rebuilt.
+   */
+  setSemanticView(ai: boolean): void {
+    if (ai === this.aiView) return
+    this.aiView = ai
+    this.applySemanticView()
+  }
+
+  private isSemanticNode(el: NodeSingular): boolean {
+    const kind = el.data('kind')
+    if (kind === 'SEMANTIC' || kind === 'LOCAL_LLM' || kind === 'GPU') return true
+    return !!(el.data('semantic') || el.data('gpu_attributed'))
+  }
+
+  private applySemanticView(): void {
+    this.cy.batch(() => {
+      this.cy.elements().removeClass('ai-dim')
+      if (!this.aiView) return
+      const keep = new Set<string>()
+      this.cy.nodes().forEach((n) => {
+        if (this.isSemanticNode(n)) keep.add(n.id())
+      })
+      // GPU-attributed processes (USES_GPU endpoints) also stay
+      this.cy.edges('[kind = "USES_GPU"]').forEach((e) => {
+        keep.add(e.source().id())
+        keep.add(e.target().id())
+      })
+      this.cy.nodes().forEach((n) => {
+        if (!keep.has(n.id())) n.addClass('ai-dim')
+      })
+      this.cy.edges().forEach((e) => {
+        const s = e.source().id()
+        const t = e.target().id()
+        // keep edges inside the semantic subset (including raw socket edges)
+        if (keep.has(s) && keep.has(t)) return
+        if (this.isSemanticNode(e.source()) || this.isSemanticNode(e.target())) return
+        e.addClass('ai-dim')
+      })
+    })
+  }
+
+  /** Live GPU metrics from the `gpu` WS message (node may not exist yet). */
+  applyGpu(gpus: GpuInfo[]): void {
+    this.cy.batch(() => {
+      for (const g of gpus) {
+        const id = `gpu:${g.index}`
+        let el = this.cy.getElementById(id)
+        if (!el.length) {
+          this.cy.add({
+            group: 'nodes',
+            data: {
+              id, kind: 'GPU', label: '', semantic_type: 'GPU',
+              gpu_index: g.index,
+            },
+            position: { x: 0, y: 0 },
+          })
+          el = this.cy.getElementById(id)
+          this.pendingNewNodes += 1
+          this.scheduleIncrementalLayout()
+        }
+        const data = el.data()
+        data.name = g.name ?? data.name
+        data.utilization_percent = g.utilization_percent ?? data.utilization_percent
+        data.vram_used_mb = g.vram_used_mb ?? data.vram_used_mb
+        data.vram_total_mb = g.vram_total_mb ?? data.vram_total_mb
+        data.temperature_c = g.temperature_c ?? data.temperature_c
+        data.power_w = g.power_w ?? data.power_w
+        data.driver = g.driver ?? data.driver
+        data.fan_percent = g.fan_percent ?? data.fan_percent
+        data.processes = g.processes ?? data.processes
+        data.label = gpuLabel(g)
+        el.data(data)
+      }
+    })
   }
 
   // ------------------------------------------------------------- activity
@@ -395,6 +537,7 @@ export class GraphController {
     this.runLayout('initial')
     if (this.familyView === 'families') this.syncFamilyView()
     if (this.focusNode) this.applyFocus()
+    if (this.aiView) this.applySemanticView()
   }
 
   private flattenNode(n: TopoNode): Record<string, unknown> {
@@ -460,9 +603,45 @@ export class GraphController {
         }
         break
       }
+      // ---- semantic events (v0.3.0) ------------------------------------
+      case 'HERMES_DETECTED':
+      case 'LM_STUDIO_DETECTED':
+      case 'MCP_SERVER_DETECTED':
+      case 'SEMANTIC_DETECTED':
+      case 'MODEL_LOADED':
+      case 'MODEL_AVAILABLE': {
+        const m = ev.metadata
+        const node = m?.node as TopoNode | undefined
+        if (node) this.upsertNode(node, true, undefined)
+        const edges = m?.edges as TopoEdge[] | undefined
+        if (Array.isArray(edges)) {
+          for (const e of edges) {
+            if (e?.id && e?.source && e?.target) this.upsertEdge(e)
+          }
+        }
+        break
+      }
+      case 'SEMANTIC_LOST':
+        this.fadeRemoveNode(String(ev.metadata?.node_id ?? ev.source))
+        break
+      case 'GPU_PROCESS_ATTACHED': {
+        const m = ev.metadata
+        if (m?.edge) this.upsertEdge(m.edge as TopoEdge)
+        if (m?.sid) {
+          const el = this.cy.getElementById(String(m.sid))
+          if (el.length) el.data('gpu_attributed', true)
+        }
+        break
+      }
+      case 'GPU_PROCESS_DETACHED': {
+        const m = ev.metadata
+        if (m?.edge_id) this.fadeRemoveEdge(String(m.edge_id))
+        break
+      }
     }
     if (this.familyView === 'families') this.syncFamilyView()
     if (this.focusNode) this.applyFocus()
+    if (this.aiView) this.applySemanticView()
   }
 
   private upsertNode(node: TopoNode, born: boolean, anchorId: string | undefined): void {
