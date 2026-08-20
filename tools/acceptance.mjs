@@ -67,6 +67,9 @@ class CDP {
   }
 
   async eval(expression) {
+    if (typeof expression !== 'string') {
+      throw new Error(`cdp.eval: undefined/non-string expression (got ${String(expression)})`)
+    }
     const r = await this.send('Runtime.evaluate', {
       expression,
       returnByValue: true,
@@ -182,8 +185,53 @@ const EX = {
     const r = cy.container().getBoundingClientRect()
     return { x: Math.round(r.left + rp.x), y: Math.round(r.top + rp.y), name: n.data('name') }
   })()`,
+  benchmarkBadge: `document.querySelector('.benchmark-badge')?.innerText ?? ''`,
+  perfPanelVisible: `document.querySelector('.perf-panel') !== null`,
+  perfSnapshot: `window.__esw_perf ? JSON.stringify(window.__esw_perf.snapshot()) : 'null'`,
+  testOnlyNodes: `window.__esw_cy ? window.__esw_cy.nodes('[?test_only]').length : -1`,
+  realPidNodes: `(() => { const cy = window.__esw_cy; if (!cy) return -1; let n = 0; cy.nodes('[?pid]').forEach(x => { if ((x.data('pid') || 0) < 400000) n++ }); return n })()`,
+  familyNodes2: `window.__esw_cy ? window.__esw_cy.nodes('[?family]').length : -1`,
+  zoomLevel: `window.__esw_cy ? window.__esw_cy.zoom() : -1`,
+  clickAiPill: `[...document.querySelectorAll('.pill')].find(b => b.textContent.trim() === 'AI')?.click() ?? false`,
+  clickSystemPill: `[...document.querySelectorAll('.pill')].find(b => b.textContent.trim() === 'SYSTEM')?.click() ?? false`,
   closeInspector: `document.querySelector('.inspector .icon-btn')?.click() ?? false`,
   toggleDrawer: `document.querySelector('.drawer-toggle')?.click() ?? false`,
+}
+
+const BM_API = `${API}/api/benchmark`
+const BM_HEADERS = { 'Content-Type': 'application/json', 'X-ESW-Benchmark': 'test-only' }
+
+async function benchmarkActivate(nodes, seed) {
+  return (await fetch(`${BM_API}/activate`, {
+    method: 'POST', headers: BM_HEADERS, body: JSON.stringify({ nodes, seed }),
+  })).json()
+}
+
+async function benchmarkDeactivate() {
+  return (await fetch(`${BM_API}/deactivate`, { method: 'POST' })).json()
+}
+
+/**
+ * Benchmark helper: activate a synthetic graph size, reload the page and
+ * wait until the frontend has applied the full fixture (poll node count).
+ * Returns the perf snapshot once stable. TEST-ONLY — synthetic data is
+ * always labeled benchmark/test_only and never mixed with real telemetry.
+ */
+async function benchmarkLoad(cdp, nodes, timeoutMs = 40000) {
+  const st = await benchmarkActivate(nodes)
+  if (!st.active) throw new Error(`benchmark activate failed: ${JSON.stringify(st)}`)
+  await cdp.send('Page.reload')
+  const t0 = Date.now()
+  let count = 0
+  while (Date.now() - t0 < timeoutMs) {
+    await sleep(1500)
+    count = await cdp.eval(EX.nodeCount)
+    if (count >= nodes) break
+  }
+  // let the layout + perf sampler settle
+  await sleep(4000)
+  const snap = JSON.parse(await cdp.eval(EX.perfSnapshot))
+  return { status: st, nodes: count, snap }
 }
 
 async function getTarget() {
@@ -918,6 +966,200 @@ async function main() {
   } else {
     console.log('  SKIP  Z1–Z6 (no real semantic detections to show)')
   }
+
+  // ---- Test AA: LARGE GRAPH benchmark (TEST-ONLY synthetic data) ----------
+  // Deterministic synthetic fixtures through the real WS -> GraphController
+  // -> overlay path. Everything here is labeled benchmark/test_only; the
+  // page is returned to REAL mode before the final screenshot below.
+  console.log('\n[Test AA] Large graph benchmark (TEST-ONLY synthetic)')
+  await cdp.eval(`(() => { window.__esw_cyAA = window.__esw_cy; return !!window.__esw_cy })()`)
+  let st0 = await (await fetch(`${BM_API}/status`)).json()
+  if (st0.active) {
+    // defensive: a previous interrupted run may have left it active
+    await benchmarkDeactivate()
+    st0 = await (await fetch(`${BM_API}/status`)).json()
+  }
+  check('AA0 benchmark inactive by default', st0.active === false, JSON.stringify(st0))
+
+  // gate: activation without the test-only header is refused
+  const gated = await (await fetch(`${BM_API}/activate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodes: 500 }),
+  })).json()
+  check('AA0b activation header-gated', !!gated.error, gated.error || 'no error')
+
+  // ---- 500 nodes ----------------------------------------------------------
+  const b500 = await benchmarkLoad(cdp, 500)
+  // instance marker must be captured on the CURRENT page (each benchmarkLoad
+  // reloads the page, so a marker set before it points at the old context)
+  await cdp.eval(`(() => { window.__esw_cyAA = window.__esw_cy; return true })()`)
+  check('AA1 500-node fixture applied', b500.nodes >= 500, `nodes=${b500.nodes}`)
+  const badge500 = await cdp.eval(EX.benchmarkBadge)
+  check('AA2 benchmark badge visible', /BENCHMARK MODE/.test(badge500), badge500)
+  const testOnly500 = await cdp.eval(EX.testOnlyNodes)
+  const realPids500 = await cdp.eval(EX.realPidNodes)
+  check('AA3 every node labeled test_only', testOnly500 === b500.nodes, `testOnly=${testOnly500}`)
+  check('AA4 zero real pids in fixture', realPids500 === 0, `realPids=${realPids500}`)
+  const edges500 = await cdp.eval(EX.edgeCount)
+  check('AA5 proportionate edges', edges500 >= Math.round(b500.nodes * 0.5), `edges=${edges500}`)
+  check('AA6 perf panel visible (benchmark only)', await cdp.eval(EX.perfPanelVisible))
+  const perf500 = await cdp.eval(EX.perfSnapshot)
+  const p500 = JSON.parse(perf500)
+  check('AA7 perf instrumentation active', p500.updateMs.count >= 1 && p500.layoutMs.count >= 1,
+    `update=${p500.updateMs.last.toFixed(1)}ms layout=${p500.layoutMs.last.toFixed(1)}ms`)
+  console.log(`  info  500: update=${p500.updateMs.last.toFixed(1)}ms layout=${p500.layoutMs.last.toFixed(1)}ms nodes=${p500.nodes} edges=${p500.edges}`)
+  // AI toggle at 500: instance preserved, timing measured
+  await cdp.eval(EX.clickAiPill)
+  await sleep(600)
+  const aiDim500 = await cdp.eval(`window.__esw_cy ? window.__esw_cy.elements('.ai-dim').length : -1`)
+  const same500 = await cdp.eval(`window.__esw_cy === window.__esw_cyAA`)
+  const p500b = JSON.parse(await cdp.eval(EX.perfSnapshot))
+  check('AA8 AI toggle dims unrelated nodes', aiDim500 > 0, `dimmed=${aiDim500}`)
+  check('AA9 toggle preserves graph instance', same500 === true)
+  check('AA10 AI toggle fast at 500', p500b.aiToggleMs !== null && p500b.aiToggleMs < 2000,
+    `aiToggle=${p500b.aiToggleMs?.toFixed(1)}ms`)
+  await cdp.eval(EX.clickSystemPill)
+  await sleep(400)
+  const dimAfter500 = await cdp.eval(`window.__esw_cy ? window.__esw_cy.elements('.ai-dim').length : -1`)
+  check('AA10b SYSTEM restores at 500', dimAfter500 === 0, `dimmed=${dimAfter500}`)
+  // search + filter responsiveness at 500
+  await cdp.eval(`window.__esw_controller?.setSearch('svchost') ?? false`)
+  await cdp.eval(`window.__esw_controller?.setFilter('active') ?? false`)
+  const p500c = JSON.parse(await cdp.eval(EX.perfSnapshot))
+  check('AA11 search fast at 500', p500c.searchMs !== null && p500c.searchMs < 2000,
+    `search=${p500c.searchMs?.toFixed(1)}ms`)
+  check('AA12 filter fast at 500', p500c.filterMs !== null && p500c.filterMs < 2000,
+    `filter=${p500c.filterMs?.toFixed(1)}ms`)
+  await cdp.eval(`window.__esw_controller?.setFilter('all') ?? false`)
+  await cdp.eval(`window.__esw_controller?.setSearch('') ?? false`)
+  await cdp.shot('aa-benchmark-500.png')
+
+  // particle budget: TEST-ONLY injected activity (benchmark mode only)
+  const injected = await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    const edges = cy.edges()
+    const items = []
+    for (let i = 0; i < 600; i++) {
+      const e = edges[i % edges.length]
+      items.push({ edge_id: e.id(), fwd_bps: 400000 + (i % 3) * 500000, rev_bps: 200000,
+        duration_ms: 200, fwd_bytes: 1000, rev_bytes: 500, level: (i % 3) + 1, last_activity: Date.now() / 1000 })
+    }
+    window.__esw_controller.testInjectActivity(items)
+    return items.length
+  })()`)
+  check('AA13 synthetic activity injected', injected === 600, `items=${injected}`)
+  let ovAA = null
+  for (let i = 0; i < 24; i++) {
+    await sleep(500)
+    ovAA = JSON.parse(await cdp.eval(EX.overlayStats))
+    if ((ovAA?.particles || 0) > 0 && ovAA.running) break
+  }
+  check('AA14 particles spawn from injected activity', (ovAA?.particles || 0) > 0, `particles=${ovAA?.particles}`)
+  check('AA15 global particle budget respected', (ovAA?.particles || 0) <= ovAA?.budget?.maxParticles,
+    `particles=${ovAA?.particles} cap=${ovAA?.budget?.maxParticles}`)
+  check('AA16 activity edges bounded', (ovAA?.activity || 0) <= (ovAA?.budget?.activityEdges || 0),
+    `activity=${ovAA?.activity} cap=${ovAA?.budget?.activityEdges}`)
+  check('AA17 injected activity flagged synthetic', (ovAA?.synthetic || 0) === (ovAA?.activity || 0),
+    `synthetic=${ovAA?.synthetic} activity=${ovAA?.activity}`)
+  await cdp.eval(`window.__esw_controller?.testForceIdle() ?? false`)
+  await sleep(500)
+  const ovIdle = JSON.parse(await cdp.eval(EX.overlayStats))
+  check('AA18 idle clears particles', ovIdle.particles === 0 && ovIdle.running === false,
+    `particles=${ovIdle.particles} running=${ovIdle.running}`)
+
+  // ---- 1000 nodes ---------------------------------------------------------
+  const b1000 = await benchmarkLoad(cdp, 1000)
+  await cdp.eval(`(() => { window.__esw_cyAA = window.__esw_cy; return true })()`)
+  check('AA19 1000-node fixture applied', b1000.nodes >= 1000, `nodes=${b1000.nodes}`)
+  const p1000 = b1000.snap
+  console.log(`  info  1000: update=${p1000.updateMs.last.toFixed(1)}ms layout=${p1000.layoutMs.last.toFixed(1)}ms nodes=${p1000.nodes} edges=${p1000.edges}`)
+  check('AA20 layout completes at 1000', p1000.layoutMs.last > 0 && p1000.layoutMs.last < 60000,
+    `layout=${p1000.layoutMs.last.toFixed(1)}ms`)
+  await cdp.eval(EX.clickAiPill)
+  await sleep(800)
+  const p1000b = JSON.parse(await cdp.eval(EX.perfSnapshot))
+  const same1000 = await cdp.eval(`window.__esw_cy === window.__esw_cyAA`)
+  check('AA21 AI toggle at 1000 preserves instance', same1000 === true)
+  check('AA22 AI toggle measured at 1000', p1000b.aiToggleMs !== null && p1000b.aiToggleMs < 3000,
+    `aiToggle=${p1000b.aiToggleMs?.toFixed(1)}ms`)
+  await cdp.eval(EX.clickSystemPill)
+  await sleep(400)
+  await cdp.eval(`window.__esw_controller?.setSearch('chrome') ?? false`)
+  const p1000c = JSON.parse(await cdp.eval(EX.perfSnapshot))
+  check('AA23 search at 1000 responsive', p1000c.searchMs !== null && p1000c.searchMs < 3000,
+    `search=${p1000c.searchMs?.toFixed(1)}ms`)
+  await cdp.eval(`window.__esw_controller?.setSearch('') ?? false`)
+  await cdp.shot('aa-benchmark-1000.png')
+
+  // ---- 1500 nodes ---------------------------------------------------------
+  const b1500 = await benchmarkLoad(cdp, 1500)
+  check('AA24 1500-node fixture applied', b1500.nodes >= 1500, `nodes=${b1500.nodes}`)
+  const p1500 = b1500.snap
+  console.log(`  info  1500: update=${p1500.updateMs.last.toFixed(1)}ms layout=${p1500.layoutMs.last.toFixed(1)}ms nodes=${p1500.nodes} edges=${p1500.edges} fps=${p1500.fps}`)
+  check('AA25 layout completes at 1500', p1500.layoutMs.last > 0 && p1500.layoutMs.last < 90000,
+    `layout=${p1500.layoutMs.last.toFixed(1)}ms`)
+  await cdp.eval(EX.clickAiPill)
+  await sleep(1000)
+  const p1500b = JSON.parse(await cdp.eval(EX.perfSnapshot))
+  check('AA26 AI toggle at 1500 measured', p1500b.aiToggleMs !== null && p1500b.aiToggleMs < 5000,
+    `aiToggle=${p1500b.aiToggleMs?.toFixed(1)}ms`)
+  await cdp.eval(EX.clickSystemPill)
+  await sleep(400)
+  await cdp.eval(`window.__esw_controller?.setFilter('highcpu') ?? false`)
+  const p1500c = JSON.parse(await cdp.eval(EX.perfSnapshot))
+  check('AA27 highcpu filter at 1500 responsive', p1500c.filterMs !== null && p1500c.filterMs < 5000,
+    `filter=${p1500c.filterMs?.toFixed(1)}ms`)
+  await cdp.eval(`window.__esw_controller?.setFilter('all') ?? false`)
+  await cdp.shot('aa-benchmark-1500.png')
+
+  // family view on the synthetic fixture (fixture contains real-shaped families)
+  await cdp.eval(`[...document.querySelectorAll('.view-toggle .pill')].find(b => b.textContent === 'FAMILIES')?.click() ?? false`)
+  await sleep(2500)
+  const famAA = await cdp.eval(EX.familyNodes2)
+  check('AA28 families collapse benchmark graph', famAA >= 1, `families=${famAA}`)
+  await cdp.eval(`[...document.querySelectorAll('.view-toggle .pill')].find(b => b.textContent === 'NODES')?.click() ?? false`)
+  await sleep(1500)
+
+  // ---- 2000 nodes (validation target, soft gates) -------------------------
+  const b2000 = await benchmarkLoad(cdp, 2000)
+  check('AA29 2000-node fixture applied', b2000.nodes >= 2000, `nodes=${b2000.nodes}`)
+  const p2000 = b2000.snap
+  console.log(`  info  2000: update=${p2000.updateMs.last.toFixed(1)}ms layout=${p2000.layoutMs.last.toFixed(1)}ms nodes=${p2000.nodes} edges=${p2000.edges} fps=${p2000.fps}`)
+  const z0 = await cdp.eval(EX.zoomLevel)
+  await cdp.eval(`(() => { window.__esw_cy?.zoom({ level: window.__esw_cy.zoom() * 1.6 }); return true })()`)
+  await sleep(800)
+  const z1 = await cdp.eval(EX.zoomLevel)
+  const cyAlive = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes().length : -1`)
+  check('AA30 2000-node graph interactive (zoom)', z1 > z0 && cyAlive >= 2000, `zoom ${z0.toFixed(2)} -> ${z1.toFixed(2)}`)
+  check('AA31 layout completes at 2000', p2000.layoutMs.last > 0 && p2000.layoutMs.last < 120000,
+    `layout=${p2000.layoutMs.last.toFixed(1)}ms`)
+  await cdp.eval(`(() => { window.__esw_cy?.fit(undefined, 40); return true })()`)
+  await sleep(800)
+  await cdp.shot('aa-benchmark-2000.png')
+
+  // ---- cleanup: back to REAL mode, nothing synthetic remains -------------
+  const deact = await benchmarkDeactivate()
+  check('AA32 benchmark deactivated', deact.active === false, JSON.stringify(deact))
+  await cdp.send('Page.reload')
+  await sleep(9000)
+  const realNodes = await cdp.eval(EX.nodeCount)
+  const realTestOnly = await cdp.eval(EX.testOnlyNodes)
+  const realBadge = await cdp.eval(EX.benchmarkBadge)
+  const realPerfPanel = await cdp.eval(EX.perfPanelVisible)
+  const connReal = await cdp.eval(EX.connLabel)
+  check('AA33 real mode restored after benchmark', connReal === '● LIVE' && realNodes >= 100,
+    `nodes=${realNodes} conn=${connReal}`)
+  check('AA34 zero synthetic nodes remain', realTestOnly === 0, `testOnly=${realTestOnly}`)
+  check('AA35 benchmark badge gone in real mode', realBadge === '', realBadge)
+  check('AA36 perf panel hidden in real mode', realPerfPanel === false)
+  const pythonReal = await cdp.eval(EX.hasNode('python.exe'))
+  check('AA37 real python.exe back', pythonReal >= 1, `count=${pythonReal}`)
+  // the injection hook must refuse to fabricate activity outside benchmark
+  const gateThrow = await cdp.eval(`(() => {
+    try { window.__esw_controller.testInjectActivity([]); return 'no-throw' }
+    catch (e) { return e.message }
+  })()`)
+  check('AA38 testInjectActivity gated to benchmark', /TEST-ONLY/.test(gateThrow), gateThrow)
 
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact

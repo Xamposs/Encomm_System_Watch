@@ -1,9 +1,9 @@
-import type { ConnectionStatus, SemanticSummary, Stats, TelemetryInfo } from '../types/system'
+import type { ConnectionStatus, Mode, SemanticSummary, Stats, TelemetryInfo } from '../types/system'
 import { fmtBps } from '../graph/GraphController'
 
 interface Props {
   status: ConnectionStatus
-  mode: 'live' | 'demo'
+  mode: Mode
   stats: Stats | null
   feedTs: number | null
   telemetry: TelemetryInfo | null
@@ -83,6 +83,11 @@ export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
 
       <div className="header-right">
         {mode === 'demo' && <div className="demo-badge">DEMO MODE</div>}
+        {mode === 'benchmark' && (
+          <div className="benchmark-badge" title="TEST-ONLY synthetic graph — never real telemetry">
+            BENCHMARK MODE · TEST DATA
+          </div>
+        )}
         <div className={`conn-label ${status}`}>{connLabel}</div>
         <div className="stat-block">
           <div className="stat-line">

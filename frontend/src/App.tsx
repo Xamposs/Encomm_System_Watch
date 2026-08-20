@@ -6,6 +6,7 @@ import { FilterBar } from './components/FilterBar'
 import { Inspector } from './components/Inspector'
 import { EventDrawer } from './components/EventDrawer'
 import { Legend } from './components/Legend'
+import { PerfPanel } from './components/PerfPanel'
 import type { Filter, SemanticView, ViewMode } from './types/system'
 
 export default function App() {
@@ -47,6 +48,7 @@ export default function App() {
         search={search}
         onSearch={setSearch}
         onFit={() => controllerRef.current?.fit()}
+        onRelayout={() => controllerRef.current?.relayout()}
         onZoomIn={() => controllerRef.current?.zoomIn()}
         onZoomOut={() => controllerRef.current?.zoomOut()}
         viewMode={viewMode}
@@ -81,6 +83,7 @@ export default function App() {
           onFocusNode={(id) => applyFocus(id === focusNode ? null : id, 1)}
         />
         <Legend />
+        <PerfPanel mode={mode} />
         {!ready && (
           <div className="boot-overlay">
             <span className={status === 'disconnected' ? 'boot-err' : ''}>

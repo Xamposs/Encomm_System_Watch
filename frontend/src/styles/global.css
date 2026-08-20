@@ -794,3 +794,84 @@ body,
 .lg-node.lg-llm { background: #10273a; border-color: #38bdf8; }
 .lg-node.lg-gpu { background: #12251f; border-color: #34d399; }
 .lg-edge.lg-sem-e { color: #8b5cf6; }
+
+/* ------------------------------------------------------ v0.3.1 additions */
+
+/* TEST-ONLY benchmark mode badge (never visible in normal mode) */
+.benchmark-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: #8a97a8;
+  border: 1px dashed #7d8fa3;
+  padding: 3px 8px;
+  background: rgba(125, 143, 163, 0.08);
+}
+
+/* ETW attribution health warning row (read-only detector) */
+.ev-etw-health {
+  border-left-color: #f0a63c;
+  background: rgba(240, 166, 60, 0.06);
+}
+
+/* development diagnostics overlay — ONLY rendered in benchmark mode */
+.perf-panel {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 40;
+  min-width: 250px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: #9db6cd;
+  background: rgba(7, 11, 16, 0.92);
+  border: 1px dashed #5c6b7a;
+  border-radius: 3px;
+  pointer-events: none;
+  user-select: none;
+}
+.perf-title {
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: #c4daf0;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(92, 107, 122, 0.4);
+  padding-bottom: 3px;
+}
+.perf-test {
+  color: #8a97a8;
+  font-size: 8.5px;
+  letter-spacing: 1px;
+  float: right;
+}
+.perf-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.perf-row span {
+  min-width: 88px;
+  color: #7c8aa5;
+  text-transform: uppercase;
+  font-size: 8.5px;
+  letter-spacing: 0.5px;
+}
+.perf-row b {
+  color: #b4cbe0;
+  font-weight: 600;
+  min-width: 48px;
+}
+.perf-dim { color: #5c6b7a; min-width: 0 !important; }
+.perf-ws { margin-top: 4px; border-top: 1px solid rgba(92, 107, 122, 0.3); padding-top: 3px; }
+.perf-note {
+  margin-top: 4px;
+  font-size: 8px;
+  letter-spacing: 1px;
+  color: #8a97a8;
+  border-top: 1px solid rgba(92, 107, 122, 0.3);
+  padding-top: 3px;
+  text-align: center;
+}

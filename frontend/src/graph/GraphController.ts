@@ -19,6 +19,7 @@ import type {
   ViewMode,
 } from '../types/system'
 import { EdgePulseOverlay, RECENT_MS } from './EdgePulseOverlay'
+import { perf } from './PerfMonitor'
 
 cytoscape.use(fcose)
 
@@ -189,6 +190,19 @@ export const STYLESHEET: StylesheetStyle[] = [
   { selector: 'edge.fading', style: { opacity: 0 } },
   { selector: 'node.fading', style: { opacity: 0 } },
   { selector: 'node.no-labels', style: { label: '' } }, // hide labels at low zoom
+  // ---- large-graph LOD + benchmark markers (v0.3.1) ----------------------
+  // far zoom: arrowheads are invisible — drop the geometry so dense graphs
+  // render cheaply; edges thin out and subdue
+  {
+    selector: 'edge.lod-far',
+    style: { 'target-arrow-shape': 'none', 'arrow-scale': 0, opacity: 0.55 },
+  },
+  // synthetic TEST/BENCHMARK fixture nodes: same visual language, dashed
+  // border marks them as non-real (never present in normal mode)
+  {
+    selector: 'node[?benchmark]',
+    style: { 'border-style': 'dashed', 'border-color': '#7d8fa3' },
+  },
 ]
 
 function portLabel(ports: number[]): string {
@@ -224,6 +238,13 @@ interface EdgeActivityState {
 const ZOOM_FAR = 0.45
 const ZOOM_CLOSE = 0.95
 
+// incremental-layout policy (v0.3.1): on large graphs, small node additions
+// must NOT trigger an expensive fcose pass over the whole graph. Above
+// LARGE_GRAPH_NODES, an incremental layout only runs when the pending batch
+// reaches LARGE_GRAPH_MIN_BATCH (or 5% of the graph, whichever is larger).
+const LARGE_GRAPH_NODES = 600
+const LARGE_GRAPH_MIN_BATCH = 40
+
 /**
  * Imperative controller over a single Cytoscape instance. All graph mutations
  * happen here (cy.batch), bypassing React — React only drives stats/events/
@@ -250,6 +271,11 @@ export class GraphController {
   private labelsVisible = true
   private compactMode = false
   private aiView = false
+  private benchmarkMode = false
+  private lodFar = false
+  /** last label actually written per node (avoids redundant cytoscape
+   * dirtying on every metrics tick — v0.3.1 large-graph optimization) */
+  private labelCache = new Map<string, string>()
 
   constructor(
     private cy: Core,
@@ -266,7 +292,23 @@ export class GraphController {
       this.updateLabelVisibility()
       this.refreshLabels()
       this.updateCompactMode()
+      this.updateEdgeLod()
     })
+    perf.setGraphSource({
+      nodes: () => this.cy.nodes().length,
+      edges: () => this.cy.edges().length,
+      visibleNodes: () => this.cy.nodes(':visible').length,
+      visibleEdges: () => this.cy.edges(':visible').length,
+      particles: () => this.overlay.stats().particles,
+      overlayRunning: () => this.overlay.stats().running,
+      overlayActivity: () => this.overlay.stats().activity,
+    })
+  }
+
+  /** TEST-ONLY benchmark mode flag (set from the WS snapshot mode). */
+  setBenchmarkMode(on: boolean): void {
+    this.benchmarkMode = on
+    perf.setBenchmarkMode(on)
   }
 
   // ------------------------------------------------------------ view modes
@@ -296,7 +338,9 @@ export class GraphController {
   setSemanticView(ai: boolean): void {
     if (ai === this.aiView) return
     this.aiView = ai
+    const t0 = performance.now()
     this.applySemanticView()
+    perf.recordAiToggle(performance.now() - t0)
   }
 
   private isSemanticNode(el: NodeSingular): boolean {
@@ -369,8 +413,9 @@ export class GraphController {
 
   // ------------------------------------------------------------- activity
 
-  applyActivity(items: NetworkActivityItem[], nodes: NetworkActivityNode[]): void {
+  applyActivity(items: NetworkActivityItem[], nodes: NetworkActivityNode[], synthetic = false): void {
     if (this.activityMuted) return
+    const t0 = performance.now()
     const now = performance.now()
     const touched = new Set<string>()
     for (const it of items) {
@@ -431,7 +476,23 @@ export class GraphController {
         el.data('last_activity', n.last_activity)
       }
     })
-    this.overlay.applyActivity(items)
+    this.overlay.applyActivity(items, synthetic)
+    perf.recordActivityBatch(performance.now() - t0)
+  }
+
+  /**
+   * TEST ONLY (benchmark mode): inject synthetic activity batches to
+   * exercise the particle budget deterministically. Throws outside
+   * benchmark mode — real telemetry is never fabricated. Injected
+   * particles are flagged ``synthetic`` in the overlay stats.
+   */
+  testInjectActivity(items: NetworkActivityItem[]): void {
+    if (!this.benchmarkMode) {
+      throw new Error('testInjectActivity is TEST-ONLY and requires benchmark mode')
+    }
+    const existing = items.filter((it) => this.cy.getElementById(it.edge_id).length > 0)
+    if (existing.length === 0) return
+    this.applyActivity(existing, [], true)
   }
 
   // --------------------------------------------------- activity decay (v0.2.1)
@@ -519,6 +580,7 @@ export class GraphController {
   // ---------------------------------------------------------------- snapshot
 
   replaceAll(nodes: TopoNode[], edges: TopoEdge[]): void {
+    const t0 = performance.now()
     this.pendingNodeRemoves.clear()
     this.pendingEdgeRemoves.clear()
     this.cy.batch(() => {
@@ -533,11 +595,14 @@ export class GraphController {
       this.cy.add(defs)
     })
     this.pendingNewNodes = 0
+    this.labelCache.clear()
     this.refreshLabels()
+    this.updateEdgeLod()
     this.runLayout('initial')
     if (this.familyView === 'families') this.syncFamilyView()
     if (this.focusNode) this.applyFocus()
     if (this.aiView) this.applySemanticView()
+    perf.recordUpdate(performance.now() - t0)
   }
 
   private flattenNode(n: TopoNode): Record<string, unknown> {
@@ -777,6 +842,11 @@ export class GraphController {
 
   // ------------------------------------------------------- semantic zoom
 
+  /**
+   * Writes node labels per zoom bucket, but ONLY when the label actually
+   * changed (labelCache): on a large graph, metric ticks must not re-dirty
+   * every node's label every second — that forces a full style pass.
+   */
   private refreshLabels(): void {
     const zoom = this.cy.zoom()
     const bucket: 'far' | 'mid' | 'close' =
@@ -784,18 +854,43 @@ export class GraphController {
     if (bucket === this.zoomBucket && !this.labelDirty) return
     this.zoomBucket = bucket
     this.labelDirty = false
+    // prune cache entries for nodes that no longer exist
+    if (this.labelCache.size > this.cy.nodes().length * 2) {
+      const live = new Set(this.cy.nodes().map((n) => n.id()))
+      for (const id of this.labelCache.keys()) {
+        if (!live.has(id)) this.labelCache.delete(id)
+      }
+    }
     this.cy.batch(() => {
       this.cy.nodes('[kind = "PROCESS"]').forEach((n) => {
         if (n.data('family')) return
         const name = String(n.data('name') ?? n.data('label') ?? '')
-        if (bucket === 'far') n.data('label', '')
-        else if (bucket === 'mid') n.data('label', name)
+        let label: string
+        if (bucket === 'far') label = ''
+        else if (bucket === 'mid') label = name
         else {
           const cpu = Number(n.data('cpu_percent') ?? 0)
           const mem = Math.round(Number(n.data('memory_mb') ?? 0))
-          n.data('label', `${name}\nPID ${String(n.data('pid') ?? '')} · CPU ${cpu.toFixed(1)}% · ${mem}MB`)
+          label = `${name}\nPID ${String(n.data('pid') ?? '')} · CPU ${cpu.toFixed(1)}% · ${mem}MB`
         }
+        const key = `${bucket}:${label}`
+        if (this.labelCache.get(n.id()) === key) return
+        this.labelCache.set(n.id(), key)
+        n.data('label', label)
       })
+    })
+  }
+
+  /**
+   * Edge LOD (v0.3.1): at far zoom, arrowheads and glows are invisible —
+   * drop arrow geometry and thin edges so dense graphs render cheaply.
+   */
+  private updateEdgeLod(): void {
+    const far = this.cy.zoom() < ZOOM_FAR
+    if (far === this.lodFar) return
+    this.lodFar = far
+    this.cy.batch(() => {
+      this.cy.edges().toggleClass('lod-far', far)
     })
   }
 
@@ -870,6 +965,13 @@ export class GraphController {
   private syncFamilyView(): void {
     const memberToRoot = this.familyOf()
     const roots = new Set(memberToRoot.values())
+    // one-pass root -> members grouping (avoids O(F*M) re-filtering)
+    const membersByRoot = new Map<string, string[]>()
+    for (const [sid, root] of memberToRoot) {
+      const list = membersByRoot.get(root) ?? []
+      list.push(sid)
+      membersByRoot.set(root, list)
+    }
     this.cy.batch(() => {
       // hide members, show (or create) family nodes
       for (const sid of memberToRoot.keys()) {
@@ -877,7 +979,7 @@ export class GraphController {
         if (el.length) el.addClass('fam-hidden')
       }
       for (const root of roots) {
-        const members = [...memberToRoot].filter(([, r]) => r === root).map(([sid]) => sid)
+        const members = membersByRoot.get(root) ?? []
         const famId = `fam:${root}`
         const rootEl = this.cy.getElementById(root)
         const name = String(rootEl.data('name') ?? '')
@@ -1038,27 +1140,45 @@ export class GraphController {
     el.data('label', `${name} ×${count}`)
   }
 
+  /**
+   * Layout policy (v0.3.1): initial layouts get a size-scaled iteration
+   * budget and no animation on very large graphs (animating 1500 nodes is
+   * janky for zero information). Incremental runs are debounced and gated
+   * by batch size (see scheduleIncrementalLayout) so the graph does not
+   * re-layout continuously as processes churn.
+   */
   private runLayout(kind: 'initial' | 'incremental'): void {
+    const n = this.cy.nodes().length
+    const numIter = n > 1500 ? 900 : n > 800 ? 1300 : 2000
+    const animate = kind !== 'initial' && n <= 800
     const options = {
       name: 'fcose',
       quality: 'default',
       randomize: kind === 'initial',
-      animate: kind !== 'initial',
+      animate,
       animationDuration: 350,
       nodeRepulsion: kind === 'initial' ? 24000 : 6000,
       idealEdgeLength: kind === 'initial' ? 185 : 110,
       gravity: kind === 'initial' ? 0.05 : 0.2,
-      numIter: kind === 'initial' ? 2000 : 300,
+      numIter,
       // tiling arranges components into a rigid grid — off for an organic map
       tile: false,
       padding: 30,
       // incremental runs must not re-fit the view (keeps user's zoom/pan stable)
       fit: kind === 'initial',
     }
+    const t0 = performance.now()
     try {
-      this.cy.layout(options).run()
+      const layout = this.cy.layout(options)
+      layout.run()
+      if (animate) {
+        layout.one('layoutstop', () => perf.recordLayout(performance.now() - t0))
+      } else {
+        perf.recordLayout(performance.now() - t0)
+      }
     } catch {
       this.cy.layout({ name: 'cose', animate: false } as never).run()
+      perf.recordLayout(performance.now() - t0)
     }
   }
 
@@ -1066,10 +1186,23 @@ export class GraphController {
     window.clearTimeout(this.layoutTimer)
     this.layoutTimer = window.setTimeout(() => {
       if (this.pendingNewNodes > 0) {
+        const total = this.cy.nodes().length
+        const large = total > LARGE_GRAPH_NODES
+        const batch = this.pendingNewNodes
         this.pendingNewNodes = 0
+        if (large && batch < Math.max(LARGE_GRAPH_MIN_BATCH, Math.round(total * 0.05))) {
+          // small additions on a large graph keep their anchor/center
+          // positions — no full re-layout (preserves stability)
+          return
+        }
         this.runLayout('incremental')
       }
     }, 2000)
+  }
+
+  /** Manual RELAYOUT: re-run the initial layout (fit + randomize). */
+  relayout(): void {
+    this.runLayout('initial')
   }
 
   fit(): void {
@@ -1088,7 +1221,9 @@ export class GraphController {
 
   setFilter(filter: Filter): void {
     this.filter = filter
+    const t0 = performance.now()
     this.applyFilter()
+    perf.recordFilter(performance.now() - t0)
   }
 
   private applyFilter(): void {
@@ -1133,11 +1268,18 @@ export class GraphController {
         })
       }
     })
+    // cytoscape quirk (v0.3.1): removing the data field behind a
+    // `display:none` selector ([?hidden]) does NOT re-run the style pass —
+    // elements stay visually hidden. `cy.style().update()` forces the pass
+    // (must run OUTSIDE the batch; a batched pass skips hidden elements).
+    this.cy.style().update()
   }
 
   setSearch(query: string): void {
     this.search = query.trim().toLowerCase()
+    const t0 = performance.now()
     this.applySearch()
+    perf.recordSearch(performance.now() - t0)
   }
 
   private applySearch(): void {

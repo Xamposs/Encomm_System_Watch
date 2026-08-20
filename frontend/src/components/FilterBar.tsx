@@ -13,6 +13,7 @@ interface Props {
   search: string
   onSearch: (q: string) => void
   onFit: () => void
+  onRelayout: () => void
   onZoomIn: () => void
   onZoomOut: () => void
   viewMode: ViewMode
@@ -28,7 +29,7 @@ interface Props {
 }
 
 export function FilterBar({
-  filter, onFilter, search, onSearch, onFit, onZoomIn, onZoomOut,
+  filter, onFilter, search, onSearch, onFit, onRelayout, onZoomIn, onZoomOut,
   viewMode, onViewMode, semanticView, onSemanticView, focusNode, focusHops,
   onFocusHops, onFocusExit, selectionCount, onClearSelection,
 }: Props) {
@@ -113,6 +114,7 @@ export function FilterBar({
       <div className="view-controls">
         <button className="icon-btn" title="Zoom out" onClick={onZoomOut}>−</button>
         <button className="icon-btn" title="Zoom in" onClick={onZoomIn}>+</button>
+        <button className="fit-btn" title="Re-run the layout (large graphs settle after big changes)" onClick={onRelayout}>RELAYOUT</button>
         <button className="fit-btn" onClick={onFit}>FIT ALL</button>
       </div>
     </div>

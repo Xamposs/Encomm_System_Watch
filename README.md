@@ -189,6 +189,28 @@ amber **DEMO MODE** badge.
   PowerShell to enable real per-edge traffic (verified end-to-end in
   v0.2.2 with `tools/verify_tier2.ps1`).
 
+## Benchmark mode (TEST-ONLY — never real telemetry)
+
+A deterministic synthetic large-graph fixture validates renderer performance
+(500 / 1000 / 1500 / 2000+ nodes) without touching real data:
+
+```bash
+# activate a 1000-node fixture (header-gated; inactive by default)
+curl -X POST http://127.0.0.1:8765/api/benchmark/activate \
+  -H "Content-Type: application/json" -H "X-ESW-Benchmark: test-only" \
+  -d '{"nodes": 1000}'
+curl http://127.0.0.1:8765/api/benchmark/status
+curl -X POST http://127.0.0.1:8765/api/benchmark/deactivate
+```
+
+While active the UI shows a **BENCHMARK MODE · TEST DATA** badge, every node
+is flagged `test_only`/`benchmark` (dashed borders), a perf diagnostics
+panel (measured timings, particle budget, fps, memory) appears, and real
+event/activity/GPU messages are suppressed so synthetic and real data can
+never mix. Deactivation returns the live graph. Benchmark fixtures are
+clearly labeled in acceptance screenshots (`aa-benchmark-*.png`) and are
+never used as the project's official real-data screenshot.
+
 ## Backend tests
 
 ```powershell
@@ -210,8 +232,9 @@ npm run typecheck
 processes, process start/stop, network, connection pulses, inspector, event
 drawer, WebSocket recovery, resilience, telemetry honesty, family view,
 focus, multi-select, tooltips, live traffic, Tier-2 wiring + decay, GPU,
-semantic framework, LM Studio, Hermes, MCP, AI view) against a headless
-Chromium:
+semantic framework, LM Studio, Hermes, MCP, AI view, and the **AA large-graph
+benchmark** — 500/1000/1500/2000-node fixtures, AI toggle, search/filter,
+particle budget, return-to-real) against a headless Chromium:
 
 ```bash
 # backend + frontend running, then:

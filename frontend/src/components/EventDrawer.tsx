@@ -25,6 +25,7 @@ const TYPE_LABEL: Record<EventType, string> = {
   MODEL_AVAILABLE: 'MODEL AVAILABLE',
   GPU_PROCESS_ATTACHED: 'GPU PROCESS ATTACHED',
   GPU_PROCESS_DETACHED: 'GPU PROCESS DETACHED',
+  ETW_HEALTH: 'ETW HEALTH',
 }
 
 const TYPE_CLASS: Record<EventType, string> = {
@@ -44,7 +45,17 @@ const TYPE_CLASS: Record<EventType, string> = {
   MODEL_AVAILABLE: 'ev-model',
   GPU_PROCESS_ATTACHED: 'ev-gpu',
   GPU_PROCESS_DETACHED: 'ev-gpu-detach',
+  ETW_HEALTH: 'ev-etw-health',
 }
+
+/**
+ * Bounded DOM rendering (v0.3.1): the event buffer stays bounded at
+ * EVENT_BUFFER_LIMIT (800) in the hook, but only the most recent
+ * RENDER_CAP rows are mounted — frequent traffic/GPU/process events can
+ * never explode the DOM or force continuous expensive re-renders while
+ * the drawer stays chronological.
+ */
+const RENDER_CAP = 150
 
 function describe(ev: SystemEvent): string {
   const m = ev.metadata ?? {}
@@ -75,17 +86,21 @@ function describe(ev: SystemEvent): string {
       return `${m.name ?? `PID ${m.pid ?? '?'}`} (PID ${m.pid ?? '?'}) → GPU ${m.gpu_index ?? '?'}${typeof m.vram_mb === 'number' ? ` · ${(Number(m.vram_mb) / 1024).toFixed(2)} GB` : ''}`
     case 'GPU_PROCESS_DETACHED':
       return `${m.name ?? `PID ${m.pid ?? '?'}`} (PID ${m.pid ?? '?'}) left GPU ${m.gpu_index ?? '?'}`
+    case 'ETW_HEALTH':
+      return `${m.state ?? '?'} · ${m.message ?? ''}`
   }
 }
 
 export function EventDrawer({ open, onToggle, events }: Props) {
   const listRef = useRef<HTMLDivElement>(null)
   const [stickToBottom, setStickToBottom] = useState(true)
+  // chronological + bounded DOM: only the newest RENDER_CAP rows mount
+  const shown = events.length > RENDER_CAP ? events.slice(-RENDER_CAP) : events
 
   useEffect(() => {
     const el = listRef.current
     if (el && stickToBottom) el.scrollTop = el.scrollHeight
-  }, [events, stickToBottom])
+  }, [shown, stickToBottom])
 
   const onScroll = () => {
     const el = listRef.current
@@ -102,14 +117,14 @@ export function EventDrawer({ open, onToggle, events }: Props) {
       </button>
       <div className="drawer-body">
         <div className="event-list" ref={listRef} onScroll={onScroll}>
-          {events.map((ev) => (
+          {shown.map((ev) => (
             <div key={ev.event_id} className={`event-row ${TYPE_CLASS[ev.event_type]}`}>
               <span className="ev-time">{ev.timestamp.slice(11, 23)}</span>
               <span className="ev-type">{TYPE_LABEL[ev.event_type]}</span>
               <span className="ev-desc">{describe(ev)}</span>
             </div>
           ))}
-          {events.length === 0 && <div className="event-empty">awaiting events…</div>}
+          {shown.length === 0 && <div className="event-empty">awaiting events…</div>}
         </div>
       </div>
     </section>

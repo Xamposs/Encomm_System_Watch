@@ -321,11 +321,40 @@ explicit direction. Documented, not used.
 - Raw per-packet telemetry never reaches the WebSocket: the aggregator emits
   one compact `network_activity` batch per 200 ms window (≤ ~5 msg/s) with
   bounded item counts.
-- Event drawer is a bounded 800-event buffer.
+- Event drawer is a bounded 800-event buffer; only the newest 150 rows are
+  mounted (v0.3.1 — frequent events cannot explode the DOM).
 - React re-renders only on stats ticks (2 s) and event batches; per-node
   metric updates mutate cytoscape data directly.
 - Pulse overlay draws only active edges (capped 30 pulses + 140 particles +
   80 recents); the rAF loop stops entirely when idle.
+- v0.3.1 large-graph strategy:
+  - **Incremental updates**: the Cytoscape instance is created once and
+    never recreated (snapshot = replace-all only on (re)connect; metric
+    updates, GPU metrics, semantic refresh, AI/SYSTEM toggle and activity
+    events mutate existing elements in place). A label cache skips
+    redundant label writes so per-second metric ticks do not re-dirty every
+    node on large graphs.
+  - **Layout policy**: initial layout with size-scaled fcose iteration
+    budget (2000 iters ≤800 nodes, 1300 ≤1500, 900 above) and no animation
+    above 800 nodes. Incremental layouts are debounced (2 s) and gated:
+    above 600 nodes they run only when a pending addition batch reaches
+    max(40, 5% of nodes) — small churn keeps anchor/center positions and
+    never re-layouts the whole graph. Manual RELAYOUT re-runs the initial
+    layout.
+  - **Semantic zoom / LOD**: far zoom (<0.45) hides process labels and
+    drops edge arrowhead geometry + thins edges (`edge.lod-far`); mid zoom
+    shows names; near zoom shows full compact-card details. Rendering cost
+    tracks zoom, not graph size.
+  - **Bounded prioritized particles**: global ceiling 140 particles /
+    400 activity edges; per-edge ceiling scales with level (2/4/6); spawn
+    order prioritizes strongest + most recent activity. When capacity is
+    exceeded only VISUAL particles are dropped — telemetry counters and
+    event truth are never touched, and nothing is ever fabricated.
+  - **Perf diagnostics** (`frontend/src/graph/PerfMonitor.ts` +
+    `PerfPanel`): measured update/layout/activity-batch/AI-toggle/
+    search/filter timings, element + visible counts, particle state, fps,
+    memory trend — exposed via `window.__esw_perf` and rendered ONLY in
+    benchmark mode. The production UI stays clean.
 
 ## 9. GPU + AI semantic observability (v0.3.0)
 
@@ -454,3 +483,47 @@ ships the seams: detector registry, evidence model, semantic nodes/edges,
 change-only events, AI view. Deep agent telemetry (tool calls, tokens, TPS,
 context usage, latency, reasoning) is intentionally NOT fabricated — it
 waits for a real existing interface to expose it.
+
+## 10. Large-graph benchmark mode + ETW health (v0.3.1)
+
+### TEST-ONLY benchmark mode (`backend/app/services/benchmark_graph.py`)
+
+Renderer/performance validation uses a deterministic synthetic fixture —
+never the real machine, never fake real telemetry.
+
+```
+POST /api/benchmark/activate {nodes, seed?}   header X-ESW-Benchmark: test-only
+GET  /api/benchmark/status
+POST /api/benchmark/deactivate
+```
+
+- Inactive by default; activation is explicit and header-gated. While
+  active, the WS snapshot serves the labeled fixture
+  (`mode: "benchmark"`, `benchmark: {label: "TEST/BENCHMARK (synthetic)",
+  …}`) and every element carries `test_only`/`benchmark` flags, synthetic
+  pids (≥400000) and `SYNTHETIC\bench` identity.
+- Real event / `network_activity` / GPU / semantic messages are suppressed
+  for the duration (the collectors keep running underneath), so synthetic
+  and real data can never mix; deactivation restores the live graph on the
+  next snapshot. There are NO system control paths — the mode only switches
+  which graph data is served.
+- Deterministic: same `node_count` + `seed` → identical graph (default seed
+  `node_count * 7919`). Realistic shapes: process families (parent + ≥2
+  same-name children), endpoints (TEST-NET IPs), listening ports,
+  GPU/semantic/model nodes; edges LOCALHOST / EXTERNAL / PROCESS_PARENT /
+  LISTEN / USES_GPU / SERVES_MODEL / SPAWNED / HOSTS / MEMBER_OF.
+
+### Read-only ETW attribution health (`backend/app/services/etw_health.py`)
+
+Long-running stale `esw-telemetry` sessions can keep delivering provider
+events while edge attribution freezes. The detector watches
+`provider.events_received` vs `aggregator.events_mapped_to_edges`:
+
+- `OK` — mapping is moving (or provider quiet).
+- `WATCHING` — events climbing, mapping frozen < 45 s (`ESW_ETW_HEALTH_FREEZE_S`).
+- `DEGRADED` — frozen ≥ threshold while tracked edges exist → surfaces
+  `ETW ATTRIBUTION DEGRADED` (one WS `ETW_HEALTH` event per transition;
+  also under `health` in `/api/telemetry/debug`).
+
+Strictly READ-ONLY: it never stops logman, restarts ETW, restarts the
+backend or kills processes — the operator restarts manually.

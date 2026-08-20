@@ -35,10 +35,12 @@ export type EventType =
   | 'MODEL_AVAILABLE'
   | 'GPU_PROCESS_ATTACHED'
   | 'GPU_PROCESS_DETACHED'
+  | 'ETW_HEALTH'
 export type Filter = 'all' | 'active' | 'listening' | 'highcpu'
 export type ConnectionStatus = 'connecting' | 'live' | 'disconnected'
 export type ViewMode = 'nodes' | 'families'
 export type SemanticView = 'system' | 'ai'
+export type Mode = 'live' | 'demo' | 'benchmark'
 
 export interface TopoNode {
   id: string
@@ -110,11 +112,20 @@ export interface Stats {
   cpu_percent: number
   mem_percent: number
   ts: number
-  mode?: 'live' | 'demo'
+  mode?: Mode
   telemetry?: TelemetryInfo
   net?: NetStats | null
   gpu?: GpuInfo[]
   semantic?: SemanticSummary
+}
+
+/** TEST-ONLY benchmark snapshot metadata (only present in benchmark mode). */
+export interface BenchmarkMeta {
+  active: boolean
+  label: string
+  node_count: number
+  edge_count: number
+  seed: number
 }
 
 export interface SystemEvent {
@@ -150,7 +161,7 @@ export interface NetworkActivityNode {
 export type ServerMessage =
   | {
       type: 'snapshot'
-      mode: 'live' | 'demo'
+      mode: Mode
       ts: number
       stats: Stats
       telemetry?: TelemetryInfo
@@ -158,6 +169,7 @@ export type ServerMessage =
       edges: TopoEdge[]
       gpu?: GpuInfo[]
       semantic?: SemanticSummary
+      benchmark?: BenchmarkMeta
     }
   | { type: 'events'; data: SystemEvent[] }
   | { type: 'stats'; data: Stats }

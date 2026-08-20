@@ -26,6 +26,7 @@ interface EdgeActivity {
   lastActivity: number // performance.now() of the last observed activity
   level: number // 1 low, 2 medium, 3 high
   lastSpawn: number
+  synthetic?: boolean // TEST-ONLY injected activity (benchmark mode)
 }
 
 const PULSE_COLORS: Record<PulseKind, string> = {
@@ -41,7 +42,12 @@ const REV_COLOR = '#ffb35c'
 const MAX_PULSES = 30
 const MAX_RECENT = 80
 const MAX_PARTICLES = 140
-const MAX_PER_EDGE = 6
+const MAX_ACTIVITY_EDGES = 400
+
+// per-edge particle ceiling scales with activity level: a low edge may keep
+// 2 particles, a high edge up to 6 — the global MAX_PARTICLES budget is
+// never exceeded, and quiet edges can never starve loud ones
+const PER_EDGE_CAP: Record<number, number> = { 1: 2, 2: 4, 3: 6 }
 
 // activity freshness windows (ms) — mirrors the backend decay model
 export const ACTIVE_MS = 500
@@ -140,8 +146,10 @@ export class EdgePulseOverlay {
 
   // ---------------------------------------------------- data activity feed
 
-  /** Feed one aggregated activity batch (from the backend, ~5 msg/s max). */
-  applyActivity(items: NetworkActivityItem[]): void {
+  /** Feed one aggregated activity batch (from the backend, ~5 msg/s max).
+   * ``synthetic`` marks TEST-ONLY injected activity (benchmark mode only)
+   * so it can never be confused with real observed bytes. */
+  applyActivity(items: NetworkActivityItem[], synthetic = false): void {
     const now = performance.now()
     const touched = new Set<string>()
     for (const it of items) {
@@ -153,6 +161,7 @@ export class EdgePulseOverlay {
         lastActivity: now,
         level: it.level,
         lastSpawn: prev?.lastSpawn ?? 0,
+        synthetic: synthetic || prev?.synthetic,
       })
     }
     // prune edges that stopped reporting and are no longer active/recent
@@ -160,12 +169,12 @@ export class EdgePulseOverlay {
       if (touched.has(eid)) continue
       if (now - st.lastActivity > RECENT_MS) this.activity.delete(eid)
     }
-    if (this.activity.size > 400) {
+    if (this.activity.size > MAX_ACTIVITY_EDGES) {
       // bounded memory: keep only the most recently active
       const sorted = [...this.activity.entries()].sort(
         (a, b) => b[1].lastActivity - a[1].lastActivity,
       )
-      this.activity = new Map(sorted.slice(0, 400))
+      this.activity = new Map(sorted.slice(0, MAX_ACTIVITY_EDGES))
     }
     if (items.length > 0) this.ensureRunning()
   }
@@ -174,7 +183,7 @@ export class EdgePulseOverlay {
     const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
     if (edge.length === 0 || edge.removed()) return
     const own = this.particles.filter((p) => p.edgeId === edgeId)
-    if (own.length >= MAX_PER_EDGE) return
+    if (own.length >= (PER_EDGE_CAP[st.level] ?? 2)) return
     if (this.particles.length >= MAX_PARTICLES) return
     const total = st.fwdBps + st.revBps
     if (total <= 0) return
@@ -205,9 +214,13 @@ export class EdgePulseOverlay {
     }
   }
 
-  private pointOn(edge: EdgeSingular, t: number): { x: number; y: number } {
+  /** Model-space point at t along the edge; null when the edge's endpoints
+   * are not computable (e.g. a display:none node mid-filter). Callers skip
+   * null so a transient hidden element can never kill the rAF loop. */
+  private pointOn(edge: EdgeSingular, t: number): { x: number; y: number } | null {
     const s = edge.sourceEndpoint()
     const e = edge.targetEndpoint()
+    if (!s || !e || typeof s.x !== 'number' || typeof e.x !== 'number') return null
     return { x: s.x + (e.x - s.x) * t, y: s.y + (e.y - s.y) * t }
   }
 
@@ -225,14 +238,22 @@ export class EdgePulseOverlay {
       if (now - st.lastActivity > RECENT_MS) this.activity.delete(edgeId)
     }
 
-    // spawn data particles for ACTIVE edges (actual observed traffic)
-    for (const [edgeId, st] of this.activity) {
+    // spawn data particles for ACTIVE edges (actual observed traffic).
+    // Prioritized: strongest level + most recent activity spawn first, so
+    // when the global particle budget is exhausted the loudest/recent edges
+    // keep their particles and quiet ones wait their turn.
+    const spawnOrder = [...this.activity.entries()].sort((a, b) => {
+      if (b[1].level !== a[1].level) return b[1].level - a[1].level
+      return b[1].lastActivity - a[1].lastActivity
+    })
+    for (const [edgeId, st] of spawnOrder) {
       const age = now - st.lastActivity
       if (age >= ACTIVE_MS) continue
       const interval = SPAWN_INTERVAL[st.level] ?? 1600
       if (now - st.lastSpawn >= interval) {
         st.lastSpawn = now
         this.spawnParticle(edgeId, st)
+        if (this.particles.length >= MAX_PARTICLES) break
       }
     }
 
@@ -280,7 +301,9 @@ export class EdgePulseOverlay {
       const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
       if (edge.length === 0 || edge.removed()) continue
       const t = (now % 2600) / 2600
-      const p = this.toRender(this.pointOn(edge, t))
+      const pt = this.pointOn(edge, t)
+      if (!pt) continue
+      const p = this.toRender(pt)
       ctx.beginPath()
       ctx.arc(p.x, p.y, 1.3 * zoom, 0, Math.PI * 2)
       ctx.fillStyle = 'rgba(63,180,216,0.14)'
@@ -292,7 +315,9 @@ export class EdgePulseOverlay {
       const edge = this.cy.getElementById(p.edgeId) as unknown as EdgeSingular
       if (edge.length === 0 || edge.removed()) continue
       const headT = p.dir === 1 ? p.t : 1 - p.t
-      const head = this.toRender(this.pointOn(edge, headT))
+      const pt = this.pointOn(edge, headT)
+      if (!pt) continue
+      const head = this.toRender(pt)
       const color = p.dir === 1 ? FWD_COLOR : REV_COLOR
       ctx.save()
       ctx.shadowColor = color
@@ -305,7 +330,9 @@ export class EdgePulseOverlay {
       for (let i = 1; i <= 4; i++) {
         const tt = p.t - i * 0.05
         if (tt < 0) break
-        const p2 = this.toRender(this.pointOn(edge, p.dir === 1 ? tt : 1 - tt))
+        const pt2 = this.pointOn(edge, p.dir === 1 ? tt : 1 - tt)
+        if (!pt2) break
+        const p2 = this.toRender(pt2)
         const a = 0.35 * (1 - i / 5)
         ctx.beginPath()
         ctx.arc(p2.x, p2.y, p.size * 0.75 * zoom * (1 - i / 10), 0, Math.PI * 2)
@@ -329,7 +356,9 @@ export class EdgePulseOverlay {
         continue
       }
       const color = PULSE_COLORS[pulse.kind]
-      const head = this.toRender(this.pointOn(edge, t))
+      const pt = this.pointOn(edge, t)
+      if (!pt) continue
+      const head = this.toRender(pt)
       ctx.save()
       ctx.shadowColor = color
       ctx.shadowBlur = 10 * zoom
@@ -341,7 +370,9 @@ export class EdgePulseOverlay {
       for (let i = 1; i <= 6; i++) {
         const tt = t - i * 0.035
         if (tt < 0) break
-        const p = this.toRender(this.pointOn(edge, tt))
+        const pt2 = this.pointOn(edge, tt)
+        if (!pt2) break
+        const p = this.toRender(pt2)
         const a = 0.4 * (1 - i / 7) * (pulse.kind === 'close' ? 0.8 : 1)
         ctx.beginPath()
         ctx.arc(p.x, p.y, 1.6 * zoom * (1 - i / 10), 0, Math.PI * 2)
@@ -394,7 +425,11 @@ export class EdgePulseOverlay {
    * Read-only diagnostics for acceptance tests / debugging: current
    * run-state of the overlay (never exposes packet data).
    */
-  stats(): { running: boolean; activity: number; particles: number; pulses: number; recent: number; stops: number } {
+  stats(): { running: boolean; activity: number; particles: number; pulses: number; recent: number; stops: number; synthetic: number; budget: { maxParticles: number; activityEdges: number; perEdgeCaps: Record<number, number> } } {
+    let synthetic = 0
+    for (const st of this.activity.values()) {
+      if (st.synthetic) synthetic += 1
+    }
     return {
       running: this.running,
       activity: this.activity.size,
@@ -402,6 +437,12 @@ export class EdgePulseOverlay {
       pulses: this.pulses.size,
       recent: this.recent.size,
       stops: this.stops,
+      synthetic,
+      budget: {
+        maxParticles: MAX_PARTICLES,
+        activityEdges: MAX_ACTIVITY_EDGES,
+        perEdgeCaps: { ...PER_EDGE_CAP },
+      },
     }
   }
 }

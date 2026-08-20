@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -25,6 +25,8 @@ from .detectors import SemanticDetectorRegistry
 from .models.entities import Event, Snapshot, TEdge
 from .services.diff_engine import DiffEngine
 from .services.event_stream import EventStream
+from .services.benchmark_graph import BenchmarkMode
+from .services.etw_health import EtwAttributionHealth
 from .services.semantic import (
     EVENT_GPU_PROCESS_ATTACHED,
     EVENT_GPU_PROCESS_DETACHED,
@@ -104,6 +106,20 @@ aggregator = ActivityAggregator(cfg)
 adapter_sampler = AdapterTotalsSampler()
 telemetry_provider = _make_telemetry_provider() if telemetry_enabled else None
 
+# ---- TEST-ONLY large-graph benchmark mode (v0.3.1) -------------------------
+# Inactive by default; activation is explicit (POST /api/benchmark/activate,
+# header-gated). While active the WS snapshot serves the synthetic fixture
+# (mode "benchmark") and real event/activity/GPU messages are suppressed so
+# synthetic and real data can never mix. No system control paths.
+benchmark = BenchmarkMode()
+
+# ---- READ-ONLY ETW attribution health detector (v0.3.1) --------------------
+# Observes provider/aggregator counters; reports WATCHING/DEGRADED when
+# provider events keep arriving but edge attribution stays frozen. Never
+# mutates ETW sessions or processes.
+_etw_freeze_s = float(os.environ.get("ESW_ETW_HEALTH_FREEZE_S", "45"))
+etw_health = EtwAttributionHealth(freeze_threshold_s=_etw_freeze_s)
+
 _state = {
     "snapshot": None,
     "topology": None,
@@ -172,7 +188,7 @@ def _stats_dict() -> dict:
     base = {
         "processes": 0, "active_conns": 0, "listening": 0,
         "cpu_percent": 0.0, "mem_percent": 0.0, "ts": time.time(),
-        "mode": _state["mode"],
+        "mode": "benchmark" if benchmark.active else _state["mode"],
         "telemetry": cap,
     }
     topo = _state.get("topology")
@@ -215,6 +231,28 @@ def _stats_dict() -> dict:
 
 
 def _snapshot_message() -> dict:
+    # TEST-ONLY benchmark mode: serve the synthetic fixture, never real
+    # topology, while active (every element is flagged test_only/benchmark).
+    if benchmark.active:
+        bm = benchmark.snapshot()
+        return {
+            "type": "snapshot",
+            "mode": "benchmark",
+            "ts": _state["last_tick"],
+            "stats": _stats_dict(),
+            "telemetry": _capability_dict(),
+            "nodes": bm["nodes"],
+            "edges": bm["edges"],
+            "gpu": [],
+            "semantic": {},
+            "benchmark": {
+                "active": True,
+                "label": bm["meta"]["label"],
+                "node_count": bm["meta"]["node_count"],
+                "edge_count": bm["meta"]["edge_count"],
+                "seed": bm["meta"]["seed"],
+            },
+        }
     topo = _state.get("topology")
     if topo is not None:
         nodes = [n.to_dict() for n in semantic_engine.augment_process_nodes(list(topo.nodes.values()))]
@@ -277,15 +315,45 @@ async def _telemetry_loop() -> None:
         except Exception:  # noqa: BLE001 — telemetry must never kill the app
             items, bursts, node_items = [], [], []
         if items or node_items:
-            stream.publish_message({
-                "type": "network_activity",
-                "window_ms": cfg.telemetry_flush_ms,
-                "ts": time.time(),
-                "items": items,
-                "nodes": node_items,
-            })
-        if bursts:
+            if not benchmark.active:
+                stream.publish_message({
+                    "type": "network_activity",
+                    "window_ms": cfg.telemetry_flush_ms,
+                    "ts": time.time(),
+                    "items": items,
+                    "nodes": node_items,
+                })
+        if bursts and not benchmark.active:
             stream.publish([e.to_dict() for e in bursts])
+        # ETW attribution health: READ-ONLY detector. While the provider
+        # keeps receiving events but edge attribution stays frozen for an
+        # extended period, surface a truthful ETW ATTRIBUTION DEGRADED
+        # warning (one WS event per transition). No automatic action.
+        try:
+            prov_health = {}
+            if telemetry_provider is not None:
+                prov_health = telemetry_provider.counters()
+                prov_health["alive"] = telemetry_provider.alive()
+            agg_health = aggregator.counters()
+            topo = _state.get("topology")
+            etw_health.sample(
+                prov_health,
+                agg_health,
+                edges_tracked=len(aggregator.edge_states()),
+                active_conns=topo.stats.active_conns if topo is not None else 0,
+                now=time.time(),
+            )
+            transition = etw_health.consume_transition()
+            if transition is not None:
+                # surface only meaningful transitions (warnings + recovery),
+                # not the quiet startup OK baseline
+                prev = transition.get("previous_state")
+                cur = transition["state"]
+                if cur in ("WATCHING", "DEGRADED", "PROVIDER_DEAD") or \
+                   prev in ("WATCHING", "DEGRADED", "PROVIDER_DEAD"):
+                    stream.publish([_etw_health_event(transition)])
+        except Exception:  # noqa: BLE001 — health detection must never kill the app
+            log.warning("etw health sample failed", exc_info=True)
         # provider health probe — must never kill the loop either
         try:
             if telemetry_provider is not None and _capability_dict().get("level") == "TIER2":
@@ -352,6 +420,18 @@ def _gpu_pid_event(pid: int, gpus: list[dict], attached: bool) -> dict:
     ).to_dict()
 
 
+def _etw_health_event(state: dict) -> dict:
+    """One WS event per ETW health transition (READ-ONLY warning)."""
+    return Event(
+        event_id=_next_event_id(),
+        event_type="ETW_HEALTH",
+        source="telemetry",
+        target=None,
+        timestamp=datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        metadata=state,
+    ).to_dict()
+
+
 async def _gpu_loop() -> None:
     """GPU metrics ~1 s, PID attribution ~2 s; never kills the app.
 
@@ -386,13 +466,16 @@ async def _gpu_loop() -> None:
                     batch.append(_gpu_pid_event(pid, gpus, attached=True))
                 for pid in sorted(detached):
                     batch.append(_gpu_pid_event(pid, gpus, attached=False))
-                if batch:
+                # benchmark mode: real GPU telemetry must not mix into the
+                # synthetic graph — keep collecting, stop forwarding
+                if batch and not benchmark.active:
                     stream.publish(batch)
             _state["gpu"] = gpus
             prev_gpus = gpus
             _state["gpu_source"] = gpu_collector.source
             _state["gpu_error"] = gpu_collector.error
-            stream.publish_message({"type": "gpu", "data": gpus, "ts": time.time()})
+            if not benchmark.active:
+                stream.publish_message({"type": "gpu", "data": gpus, "ts": time.time()})
         except Exception:  # noqa: BLE001 — GPU failure must never kill the app
             log.warning("gpu loop tick failed", exc_info=True)
         await asyncio.sleep(cfg.gpu_metrics_interval_s)
@@ -424,7 +507,7 @@ async def _collect_loop() -> None:
                 _state["semantic_last_run"] = now
                 _state["semantic_done"] = True
                 _state["detector_errors"] = detector_registry.errors
-                if sem_events:
+                if sem_events and not benchmark.active:
                     stream.publish([e.to_dict() for e in sem_events])
             if not cfg.demo_mode:
                 adapter = adapter_sampler.sample()
@@ -439,7 +522,9 @@ async def _collect_loop() -> None:
             _state["loop_ok"] = True
             _state["skipped"] = getattr(_facade, "skipped", 0)
             consecutive_errors = 0
-            if events:
+            # benchmark mode: real events must never mix into the synthetic
+            # graph — keep building real state, stop forwarding events
+            if events and not benchmark.active:
                 stream.publish([e.to_dict() for e in events])
         except Exception:  # noqa: BLE001 — the monitoring loop must never die
             consecutive_errors += 1
@@ -476,7 +561,7 @@ async def lifespan(_: FastAPI):
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.3.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -551,7 +636,51 @@ async def api_telemetry_debug() -> dict:
         "aggregator": agg,
         "edges_tracked": len(aggregator.edge_states()),
         "processes_tracked": len(aggregator.process_states()),
+        "health": etw_health.state_dict(time.time()),
     }
+
+
+# ---- TEST-ONLY benchmark mode endpoints (v0.3.1) ----------------------------
+# Explicitly activated, header-gated, read-only w.r.t. the system: they only
+# switch which graph data the WS snapshot serves. No control paths.
+
+
+class BenchmarkActivateRequest(BaseModel):
+    nodes: int = 500
+    seed: int | None = None
+
+
+@app.get("/api/benchmark/status")
+async def api_benchmark_status() -> dict:
+    """TEST-ONLY benchmark state (always readable, inactive by default)."""
+    return benchmark.status()
+
+
+@app.post("/api/benchmark/activate")
+async def api_benchmark_activate(
+    req: BenchmarkActivateRequest,
+    x_esw_benchmark: str | None = Header(default=None),
+) -> dict:
+    """Activate TEST-ONLY benchmark mode (header `X-ESW-Benchmark: test-only`).
+
+    Serves the deterministic synthetic fixture as the WS snapshot until
+    deactivated; real event/activity/GPU messages are suppressed for the
+    duration. Synthetic data is always labeled — it can never be mistaken
+    for real telemetry.
+    """
+    if (x_esw_benchmark or "").strip().lower() != "test-only":
+        return {"error": "benchmark activation requires header X-ESW-Benchmark: test-only"}
+    try:
+        status = benchmark.activate(req.nodes, req.seed, now=time.time())
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return status
+
+
+@app.post("/api/benchmark/deactivate")
+async def api_benchmark_deactivate() -> dict:
+    """Deactivate TEST-ONLY benchmark mode; the next snapshot is real again."""
+    return benchmark.deactivate()
 
 
 @app.get("/api/gpu")

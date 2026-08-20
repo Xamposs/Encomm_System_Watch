@@ -2,6 +2,153 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.3.1] — 2026-08-20
+
+Large graph performance + long-run stability checkpoint (Phase 20
+IN PROGRESS→COMPLETE). Validates 500/1000/1500/2000-node graphs with a
+TEST-ONLY deterministic benchmark mode, makes ordinary updates incremental,
+adds a layout policy, semantic zoom LOD, bounded prioritized particles,
+development perf diagnostics, a read-only ETW attribution health detector,
+and a bounded event-drawer DOM.
+
+### Added — TEST-ONLY benchmark mode (`backend/app/services/benchmark_graph.py`)
+
+- Deterministic synthetic large-graph fixture generator: same node count +
+  seed → identical graph (default seed = `node_count * 7919`). Realistic
+  shapes — process nodes (incl. families: parent + ≥2 same-name children),
+  service/system nodes, external endpoints (TEST-NET documentation IP
+  ranges), listening ports, local endpoints, GPU + semantic/model nodes —
+  and edges: LOCALHOST, EXTERNAL, PROCESS_PARENT, LISTEN, USES_GPU,
+  SERVES_MODEL, SPAWNED, HOSTS, MEMBER_OF. Proportionate density
+  (~0.5–3 edges/node).
+- **Every element is explicitly labeled TEST/BENCHMARK**: `test_only` /
+  `benchmark` flags, synthetic pids (≥400000), `SYNTHETIC\bench` identity —
+  benchmark data can never be mistaken for, or mixed with, real telemetry.
+- `BenchmarkMode` state holder: inactive by default; `POST
+  /api/benchmark/activate` is header-gated (`X-ESW-Benchmark: test-only`);
+  `POST /api/benchmark/deactivate`; `GET /api/benchmark/status`. While
+  active the WS snapshot serves only the labeled fixture (mode
+  `benchmark`) and real event/activity/GPU/semantic messages are suppressed
+  — the real collectors keep running underneath, so deactivation restores
+  the live graph instantly. No system control paths.
+
+### Added — read-only ETW attribution health detector (`backend/app/services/etw_health.py`)
+
+- Watches provider counters (`events_received`) vs aggregator
+  `events_mapped_to_edges`. When provider events keep arriving but edge
+  attribution stays frozen for an extended period (default 45 s,
+  `ESW_ETW_HEALTH_FREEZE_S`) while tracked edges exist → state machine
+  OK → WATCHING → **DEGRADED** with a truthful `ETW ATTRIBUTION DEGRADED`
+  warning (one WS `ETW_HEALTH` event per transition; also exposed under
+  `health` in `/api/telemetry/debug`).
+- **Strictly read-only**: never stops logman, never restarts ETW sessions
+  or the backend, never kills processes — the operator restarts manually.
+
+### Added — development performance diagnostics (frontend)
+
+- `PerfMonitor` (`frontend/src/graph/PerfMonitor.ts`): measured timings
+  along the update path — WebSocket message processing per type, cytoscape
+  snapshot/update duration, layout duration, activity batch duration, AI
+  toggle, search, filter; element counts + visible counts; overlay particle
+  state; animation-frame sampling (fps); memory trend (Chromium
+  `performance.memory`, 5 s samples). Exposed as `window.__esw_perf`
+  (`snapshot()`, `heapSeriesMB()`).
+- `PerfPanel` debug overlay rendered ONLY in benchmark mode (or forced via
+  `window.__esw_perf.show()`) — the normal production UI stays clean.
+
+### Changed — incremental update path (`GraphController`)
+
+- **Label cache**: process labels are only rewritten when the rendered text
+  actually changes — metric ticks no longer re-dirty every node label every
+  second on large graphs.
+- **Layout policy**: initial layouts get a size-scaled iteration budget
+  (2000 → 1300 → 900 iters above 800/1500 nodes) and no animation above
+  800 nodes; incremental fcose runs are debounced AND gated — above 600
+  nodes a layout only runs when the pending addition batch reaches
+  `max(40, 5% of nodes)`; small additions keep their anchor/center
+  positions. New manual **RELAYOUT** button re-runs the initial layout.
+- **Edge LOD**: at far zoom arrowhead geometry is dropped and edges thin
+  out (`edge.lod-far`) — dense graphs render cheaply where details are
+  invisible; real activity styling is untouched.
+- Family view grouping is now one-pass (no O(F×M) re-filtering).
+
+### Changed — bounded prioritized particles (`EdgePulseOverlay`)
+
+- Per-edge particle ceiling now scales with activity level (2/4/6 for
+  low/med/high; global ceiling stays 140); spawn order prioritizes
+  strongest level + most recent activity first; activity-edge map bounded
+  at 400. Real telemetry truth is untouched — only visual particles are
+  capped/dropped.
+- `testInjectActivity` TEST-ONLY hook (benchmark mode only; throws
+  otherwise) drives the real applyActivity path with `synthetic`-flagged
+  items so the budget is acceptance-testable without fabricating real
+  telemetry.
+
+### Changed — event drawer DOM bound
+
+- Buffer stays bounded (800) in the hook; only the newest 150 rows mount —
+  frequent traffic/GPU/process events can no longer explode the DOM.
+
+### Added — ETW health rows + benchmark badge (UI)
+
+- `ETW_HEALTH` event rows in the drawer (amber warning styling); header
+  shows `BENCHMARK MODE · TEST DATA` badge only in benchmark mode; benchmark
+  fixture nodes render with a dashed border.
+
+### Backend
+
+- New tests: `tests/test_benchmark_graph.py` (determinism, labeling,
+  structure, API gate + activate/deactivate flow), `tests/test_etw_health.py`
+  (state machine timeline, one-shot transitions, recovery, no-mutation).
+
+### Measured (benchmark fixtures, headless Chromium, production build)
+
+Initial render (snapshot → cytoscape add + fcose initial layout, measured
+via `__esw_perf`):
+
+| Nodes | edges | update (incl. layout) | layout | AI toggle | search / filter | fps |
+|---|---|---|---|---|---|---|
+| 500 | 710 | 1.20 s | 1.18 s | 6.3 ms | 2.8 / 4.4 ms | — |
+| 1000 | 1398 | 4.23 s | 4.20 s | 11.2 ms | 5.4 ms | — |
+| 1500 | 2112 | 8.87 s | 8.83 s | 20.4 ms | 15.2 ms | 60 |
+| 2000 | 2804 | 16.2 s | 16.2 s | (measured, interactive) | — | 60 |
+
+Particle budget: injected synthetic activity (600 items) → particles capped
+at 140/140, activity edges capped 400/400, all flagged synthetic; idle
+clears to 0 and the rAF loop stops. Families collapse 52 groups at 1500
+nodes. 2000-node graph stays interactive (zoom changes render instantly).
+These are renderer/benchmark measurements on synthetic fixtures — never
+real-machine telemetry.
+
+### Long-run (25 min × 2, real monitoring + local traffic phase)
+
+`tools/longrun_probe.mjs` — headless browser on the production build, 10 s
+samples, real loopback traffic harness during minutes 5–15 (port 19735 =
+synthetic-provider chain, 94,108 events mapped through the full pipeline):
+
+| metric | run 1 | run 2 |
+|---|---|---|
+| duration / samples | 25 min / 148 | 25 min / 148 |
+| browser heap (JS) | 38 → 28 MB (max 84, **Δ −9.8 MB**) | 38 → 24 MB (max 66, **Δ −13.8 MB**) |
+| backend RSS | 80 → 80 MB (max 81, **Δ +0.2 MB**) | 80 → 80 MB (max 81, **Δ +0.1 MB**) |
+| particles max | 0 (no per-edge source that run) | **4** (live DATA particles during traffic) |
+| activity edges max | 0 | 1 |
+| event rows max | 150 (render cap) | 150 (render cap) |
+| queue depth max | 0 | 48 (cap 500) |
+| verdict | BOUNDED | BOUNDED |
+
+No monotonic unbounded growth: heap oscillates with GC, RSS is flat, all
+queues/buffers hold their caps. **No leak detected.**
+
+### Acceptance
+
+- New **Test AA — LARGE GRAPH** section: benchmark activation gate, 500 /
+  1000 / 1500 / 2000-node fixtures, test_only labeling, zero real pids,
+  perf instrumentation, AI toggle (instance preserved + measured), search /
+  filter responsiveness, particle budget (injection → caps → idle), family
+  view on fixture, zoom interactivity at 2000, deactivation → return-to-real
+  (no synthetic nodes remain, injection hook gated).
+
 ## [0.3.0] — 2026-08-19
 
 GPU + AI semantic observability checkpoint (Phases 14/15/16/18 COMPLETE,

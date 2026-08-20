@@ -7,12 +7,13 @@ import type {
 } from '../types/system'
 import { WatchSocket } from '../services/ws'
 import type { GraphController } from '../graph/GraphController'
+import { perf } from '../graph/PerfMonitor'
 
 const EVENT_BUFFER_LIMIT = 800
 
 export function useSystemWatch() {
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
-  const [mode, setMode] = useState<'live' | 'demo'>('live')
+  const [mode, setMode] = useState<'live' | 'demo' | 'benchmark'>('live')
   const [ready, setReady] = useState(false)
   const [stats, setStats] = useState<Stats | null>(null)
   const [feedTs, setFeedTs] = useState<number | null>(null)
@@ -26,17 +27,20 @@ export function useSystemWatch() {
 
   useEffect(() => {
     const socket = new WatchSocket((msg) => {
+      const t0 = performance.now()
       switch (msg.type) {
         case 'snapshot':
           setMode(msg.mode)
           setStats(msg.stats)
           setFeedTs(msg.ts)
           setReady(true)
+          perf.setBenchmarkMode(msg.mode === 'benchmark')
+          controllerRef.current?.setBenchmarkMode(msg.mode === 'benchmark')
           if (msg.telemetry) {
             setTelemetry(msg.telemetry)
             controllerRef.current?.setTelemetry(msg.telemetry)
           }
-          if (msg.gpu?.length) {
+          if (msg.gpu?.length && msg.mode !== 'benchmark') {
             controllerRef.current?.applyGpu(msg.gpu)
           }
           controllerRef.current?.replaceAll(msg.nodes, msg.edges)
@@ -75,6 +79,7 @@ export function useSystemWatch() {
           controllerRef.current?.applyGpu(msg.data)
           break
       }
+      perf.recordWs(msg.type, performance.now() - t0)
     }, setStatus)
     socket.connect()
     return () => socket.close()
