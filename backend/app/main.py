@@ -738,7 +738,7 @@ async def lifespan(_: FastAPI):
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.6.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

@@ -19,6 +19,8 @@ interface Props {
   aiMetrics?: AiMetrics | null
   aiProviders?: Record<string, AiProviderState> | null
   aiFixture?: boolean
+  semanticView: 'system' | 'ai' | 'infra'
+  onSemanticView: (v: 'system' | 'ai' | 'infra') => void
 }
 
 function telemetryLabel(t: TelemetryInfo | null): { text: string; cls: string } {
@@ -183,7 +185,7 @@ export function InfraSummaryChips({ infra }: { infra?: InfraSummary }) {
   )
 }
 
-export function Header({ status, mode, stats, feedTs, telemetry, aiMetrics, aiProviders, aiFixture }: Props) {
+export function Header({ status, mode, stats, feedTs, telemetry, aiMetrics, aiProviders, aiFixture, semanticView, onSemanticView }: Props) {
   const feed = feedTs
     ? new Date(feedTs * 1000).toLocaleTimeString('en-GB', { hour12: false })
     : '--:--:--'
@@ -199,7 +201,20 @@ export function Header({ status, mode, stats, feedTs, telemetry, aiMetrics, aiPr
         <div className="brand-name">
           ENCOMM <span>SYSTEM WATCH</span>
         </div>
-        <div className="brand-sub">LIVE READ-ONLY SYSTEM MAP</div>
+        <div className="brand-sub">LIVE · READ ONLY</div>
+      </div>
+
+      {/* SYSTEM / AI / INFRA — small technical tabs, same Cytoscape instance */}
+      <div className="view-toggle" title="SYSTEM = full machine map · AI = semantic AI subset (Hermes, LM Studio, models, MCP, GPU) · INFRA = services, WSL, Docker, VMs">
+        {(['system', 'ai', 'infra'] as const).map((v) => (
+          <button
+            key={v}
+            className={`pill sem-view ${semanticView === v ? 'active' : ''}${v === 'ai' && semanticView === 'ai' ? ' ai-active' : ''}`}
+            onClick={() => onSemanticView(v)}
+          >
+            {v.toUpperCase()}
+          </button>
+        ))}
       </div>
 
       <AiSummary semantic={stats?.semantic} />
@@ -210,19 +225,19 @@ export function Header({ status, mode, stats, feedTs, telemetry, aiMetrics, aiPr
         {mode === 'demo' && <div className="demo-badge">DEMO MODE</div>}
         {mode === 'benchmark' && (
           <div className="benchmark-badge" title="TEST-ONLY synthetic graph — never real telemetry">
-            BENCHMARK MODE · TEST DATA
+            BENCHMARK MODE · TEST
           </div>
         )}
         <div className={`conn-label ${status}`}>{connLabel}</div>
         <div className="stat-block">
           <div className="stat-line">
-            <span className="stat-num">{stats?.processes ?? '—'}</span> PROCESSES
+            <span className="stat-num">{stats?.processes ?? '—'}</span> PROC
           </div>
           <div className="stat-line">
-            <span className="stat-num">{stats?.active_conns ?? '—'}</span> ACTIVE CONNECTIONS
+            <span className="stat-num">{stats?.active_conns ?? '—'}</span> CONN
           </div>
           <div className="stat-line">
-            <span className="stat-num">{stats?.listening ?? '—'}</span> LISTENING PORTS
+            <span className="stat-num">{stats?.listening ?? '—'}</span> LISTEN
           </div>
         </div>
         <div className="stat-block meta">

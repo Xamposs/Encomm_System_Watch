@@ -30,21 +30,48 @@ export function fmtBps(v: number): string {
   return `${Math.round(v)} B/s`
 }
 
+/**
+ * Deterministic per-edge curve offset (v0.6.0 UI fidelity): every edge gets a
+ * stable, mildly different bezier control point derived from its id and its
+ * endpoints' distance — fine technical wiring instead of rigid straight
+ * flowchart lines. Pure function of element state (no cy mutation), so it is
+ * safe inside a cytoscape style mapper.
+ */
+function edgeCurveDist(e: EdgeSingular): number {
+  const s = e.source().position()
+  const t = e.target().position()
+  const len = Math.hypot(t.x - s.x, t.y - s.y) || 1
+  const id = e.id()
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
+  const sign = h % 2 === 0 ? 1 : -1
+  const d = Math.min(120, Math.max(30, len * 0.18))
+  return sign * d
+}
+
 export const STYLESHEET: StylesheetStyle[] = [
   {
     selector: 'node',
     style: {
-      'background-color': '#182c44',
+      // cytoscape 3.34 does NOT apply the data(label) default mapping — an
+      // explicit mapping is required or every card renders blank (v0.6.0)
+      label: 'data(label)',
+      'background-color': '#141d2c',
       'border-color': '#4a6a92',
       'border-width': 1,
-      color: '#b4cbe0',
+      color: '#c4d8ec',
       'font-family': 'Consolas, "Cascadia Mono", monospace',
-      'font-size': 9,
+      'font-size': 12,
       'text-valign': 'center',
       'text-halign': 'center',
       'text-wrap': 'wrap',
-      'text-max-width': '175px',
+      'text-max-width': '95px',
       'text-overflow-wrap': 'anywhere',
+      // subtle backing behind label text keeps dense wiring from slicing
+      // through card text (reference control-room readability)
+      'text-background-color': '#0a0f16',
+      'text-background-opacity': 0.55,
+      'text-background-padding': '2px',
       'overlay-color': '#22d3ee',
       'overlay-opacity': 0,
       'overlay-padding': 6,
@@ -54,34 +81,41 @@ export const STYLESHEET: StylesheetStyle[] = [
   },
   {
     selector: 'node[kind = "PROCESS"]',
-    style: { shape: 'round-rectangle', width: 150, height: 34, 'border-color': '#5f83ad', 'border-width': 1.2 },
+    style: { shape: 'round-rectangle', width: 108, height: 38, 'border-color': '#5f83ad', 'border-width': 1 },
+  },
+  {
+    selector: 'node[kind = "PROCESS"].zoom-close',
+    style: { 'font-size': 11, height: 44 },
   },
   {
     selector: 'node[kind = "SYSTEM"]',
     style: {
-      shape: 'round-rectangle', width: 190, height: 52, 'border-color': '#6f96c2',
-      'border-width': 2, 'background-color': '#1b2f47', 'font-size': 10,
+      shape: 'round-rectangle', width: 150, height: 40, 'border-color': '#6f96c2',
+      'border-width': 1.5, 'background-color': '#1b2f47', 'font-size': 13,
     },
   },
   {
     selector: 'node[kind = "EXTERNAL_ENDPOINT"]',
     style: {
-      shape: 'ellipse', width: 96, height: 24, 'background-color': '#1a2533',
-      'border-color': '#5c7590', color: '#9db6cd', 'font-size': 8.5,
+      shape: 'ellipse', width: 66, height: 16, 'background-color': '#1a2533',
+      'border-color': '#5c7590', color: '#9db6cd', 'font-size': 10,
+      'text-valign': 'top', 'text-margin-y': 2,
     },
   },
   {
     selector: 'node[kind = "LISTENING_PORT"]',
     style: {
-      shape: 'square' as never, width: 32, height: 20, 'background-color': '#143024',
-      'border-color': '#5da383', color: '#9fe0c2', 'font-size': 8.5,
+      shape: 'square' as never, width: 24, height: 12, 'background-color': '#143024',
+      'border-color': '#5da383', color: '#9fe0c2', 'font-size': 9.5,
+      'text-valign': 'top', 'text-margin-y': 2,
     },
   },
   {
     selector: 'node[kind = "LOCAL_ENDPOINT"]',
     style: {
-      shape: 'square' as never, width: 42, height: 20, 'background-color': '#1b2130',
-      'border-color': '#72809f', color: '#aab4cf', 'font-size': 8,
+      shape: 'square' as never, width: 32, height: 14, 'background-color': '#1b2130',
+      'border-color': '#72809f', color: '#aab4cf', 'font-size': 9.5,
+      'text-valign': 'top', 'text-margin-y': 2,
     },
   },
   // ---- semantic nodes (GPU + AI observability, v0.3.0) --------------------
@@ -89,9 +123,9 @@ export const STYLESHEET: StylesheetStyle[] = [
   {
     selector: 'node[kind = "SEMANTIC"]',
     style: {
-      shape: 'round-rectangle', width: 150, height: 50, 'background-color': '#231a3d',
-      'border-color': '#8b5cf6', 'border-width': 1.8, color: '#d8c9ff',
-      'border-style': 'double', 'font-size': 8.5,
+      shape: 'round-rectangle', width: 106, height: 32, 'background-color': '#231a3d',
+      'border-color': '#8b5cf6', 'border-width': 1.4, color: '#d8c9ff',
+      'border-style': 'double', 'font-size': 11.5,
     },
   },
   {
@@ -104,66 +138,67 @@ export const STYLESHEET: StylesheetStyle[] = [
   {
     selector: 'node[kind = "LOCAL_LLM"]',
     style: {
-      shape: 'round-rectangle', width: 140, height: 42, 'background-color': '#10273a',
-      'border-color': '#38bdf8', 'border-width': 1.4, color: '#a5e3ff', 'font-size': 8.5,
+      shape: 'round-rectangle', width: 100, height: 30, 'background-color': '#10273a',
+      'border-color': '#38bdf8', 'border-width': 1.2, color: '#a5e3ff', 'font-size': 11.5,
     },
   },
   {
     selector: 'node[kind = "GPU"]',
     style: {
-      shape: 'round-rectangle', width: 150, height: 56, 'background-color': '#12251f',
-      'border-color': '#34d399', 'border-width': 1.8, color: '#a7f3d0', 'font-size': 8.5,
+      shape: 'round-rectangle', width: 118, height: 38, 'background-color': '#12251f',
+      'border-color': '#34d399', 'border-width': 1.4, color: '#a7f3d0', 'font-size': 11.5,
     },
   },
   // ---- infrastructure nodes (v0.4.0) — compact control-room identities ----
   {
     selector: 'node[kind = "SERVICE"]',
     style: {
-      shape: 'round-rectangle', width: 150, height: 44, 'background-color': '#2a2517',
-      'border-color': '#d9a03c', 'border-width': 1.4, color: '#f0d9a8', 'font-size': 8.5,
+      shape: 'round-rectangle', width: 112, height: 36, 'background-color': '#2a2517',
+      'border-color': '#d9a03c', 'border-width': 1.2, color: '#f0d9a8', 'font-size': 11.5,
     },
   },
   {
     selector: 'node[kind = "WSL"]',
     style: {
-      shape: 'hexagon', width: 110, height: 40, 'background-color': '#0f2730',
-      'border-color': '#22d3ee', 'border-width': 1.5, color: '#a5f3fc', 'font-size': 8.5,
+      shape: 'hexagon', width: 92, height: 26, 'background-color': '#0f2730',
+      'border-color': '#22d3ee', 'border-width': 1.2, color: '#a5f3fc', 'font-size': 11,
     },
   },
   {
     selector: 'node[kind = "DOCKER_ENGINE"]',
     style: {
-      shape: 'diamond', width: 130, height: 46, 'background-color': '#12203a',
-      'border-color': '#3b82f6', 'border-width': 1.8, color: '#bfdbfe', 'font-size': 8.5,
+      shape: 'diamond', width: 108, height: 32, 'background-color': '#12203a',
+      'border-color': '#3b82f6', 'border-width': 1.4, color: '#bfdbfe', 'font-size': 11.5,
     },
   },
   {
     selector: 'node[kind = "CONTAINER"]',
     style: {
-      shape: 'diamond', width: 118, height: 42, 'background-color': '#0f2a23',
-      'border-color': '#2dd4bf', 'border-width': 1.5, color: '#99f6e4', 'font-size': 8.5,
+      shape: 'diamond', width: 96, height: 28, 'background-color': '#0f2a23',
+      'border-color': '#2dd4bf', 'border-width': 1.2, color: '#99f6e4', 'font-size': 11,
     },
   },
   {
     selector: 'node[kind = "DOCKER_NETWORK"]',
     style: {
-      shape: 'ellipse', width: 90, height: 20, 'background-color': '#161b26',
-      'border-color': '#64748b', color: '#94a3b8', 'font-size': 8,
+      shape: 'ellipse', width: 72, height: 16, 'background-color': '#161b26',
+      'border-color': '#64748b', color: '#94a3b8', 'font-size': 9.5,
+      'text-valign': 'top', 'text-margin-y': 2,
     },
   },
   {
     selector: 'node[kind = "VM"]',
     style: {
-      shape: 'round-rectangle', width: 140, height: 46, 'background-color': '#2a1220',
-      'border-color': '#d946ef', 'border-width': 1.6, color: '#f5d0fe', 'font-size': 8.5,
+      shape: 'round-rectangle', width: 106, height: 32, 'background-color': '#2a1220',
+      'border-color': '#d946ef', 'border-width': 1.3, color: '#f5d0fe', 'font-size': 11.5,
     },
   },
   // family (process tree) nodes — same visual language, distinct border
   {
     selector: 'node[?family]',
     style: {
-      shape: 'round-rectangle', width: 168, height: 36, 'border-color': '#6f96c2',
-      'border-width': 1.5, 'background-color': '#19304a', color: '#c4daf0',
+      shape: 'round-rectangle', width: 118, height: 30, 'border-color': '#6f96c2',
+      'border-width': 1.2, 'background-color': '#19304a', color: '#c4daf0',
       'border-style': 'dashed',
     },
   },
@@ -172,13 +207,13 @@ export const STYLESHEET: StylesheetStyle[] = [
     selector: 'node.compact',
     style: {
       'background-opacity': 0.3,
-      'border-width': 2,
+      'border-width': 1.6,
       'border-color': '#7fa8d4',
     },
   },
-  { selector: 'node[?born]', style: { 'border-color': '#35e0ff', 'border-width': 2 } },
+  { selector: 'node[?born]', style: { 'border-color': '#35e0ff', 'border-width': 1.6 } },
   { selector: 'node[?highCpu]', style: { 'border-color': '#f0a63c' } },
-  { selector: 'node[?inspected]', style: { 'border-color': '#35e0ff', 'border-width': 2, 'background-color': '#0f1c2c' } },
+  { selector: 'node[?inspected]', style: { 'border-color': '#35e0ff', 'border-width': 1.8, 'background-color': '#0f1c2c' } },
   { selector: 'node[?searchMatch]', style: { 'overlay-opacity': 0.2 } },
   { selector: 'node[?dimmed]', style: { opacity: 0.18 } },
   { selector: 'node[?hidden]', style: { display: 'none' } },
@@ -189,22 +224,24 @@ export const STYLESHEET: StylesheetStyle[] = [
   // multi-select (inspection only)
   {
     selector: 'node:selected',
-    style: { 'border-color': '#35e0ff', 'border-width': 2.5, 'overlay-opacity': 0.18 },
+    style: { 'border-color': '#35e0ff', 'border-width': 2, 'overlay-opacity': 0.18 },
   },
   {
     selector: 'edge:selected',
-    style: { 'line-color': '#35e0ff', width: 2 },
+    style: { 'line-color': '#35e0ff', width: 1.8 },
   },
   {
     selector: 'edge',
     style: {
-      'line-color': '#3a5874',
+      'line-color': '#3a5a78',
       width: 1,
-      'curve-style': 'bezier',
-      opacity: 0.9,
+      'curve-style': 'unbundled-bezier',
+      'control-point-distances': (e) => edgeCurveDist(e as EdgeSingular),
+      'control-point-weights': 0.5,
+      opacity: 0.55,
       'target-arrow-shape': 'triangle',
-      'target-arrow-color': '#3a5874',
-      'arrow-scale': 0.5,
+      'target-arrow-color': '#3a5a78',
+      'arrow-scale': 0.35,
       // invisible overlay widens the hover hit-area (tooltip friendliness)
       'overlay-color': '#35e0ff',
       'overlay-opacity': 0,
@@ -213,29 +250,29 @@ export const STYLESHEET: StylesheetStyle[] = [
       'transition-duration': '300ms' as unknown as number,
     },
   },
-  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#468aa3', 'target-arrow-shape': 'none' } },
-  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#578a52', 'target-arrow-shape': 'none', 'line-style': 'dashed' } },
+  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#4e93ad', 'target-arrow-shape': 'none' } },
+  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#5f9660', 'target-arrow-shape': 'none', 'line-style': 'dashed', width: 0.9 } },
   // ---- semantic edges (v0.3.0) -------------------------------------------
-  { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#34d399', 'target-arrow-color': '#34d399', 'line-style': 'dashed', width: 1.6 } },
-  { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', width: 1.6 } },
+  { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#34d399', 'target-arrow-color': '#34d399', 'line-style': 'dashed', width: 1.3 } },
+  { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', width: 1.3 } },
   { selector: 'edge[kind = "LOCAL_API"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed' } },
-  { selector: 'edge[kind = "HOSTS"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 0.9 } },
-  { selector: 'edge[kind = "PROCESS_PARENT"]', style: { 'line-color': '#7c8aa5', 'target-arrow-color': '#7c8aa5', 'line-style': 'dotted' } },
-  { selector: 'edge[kind = "SPAWNED"]', style: { 'line-color': '#a78bfa', 'target-arrow-color': '#a78bfa', 'line-style': 'dotted' } },
-  { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#5f7fa8', 'target-arrow-color': '#5f7fa8', 'line-style': 'dotted', width: 0.8 } },
+  { selector: 'edge[kind = "HOSTS"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 0.8 } },
+  { selector: 'edge[kind = "PROCESS_PARENT"]', style: { 'line-color': '#5a6b85', 'target-arrow-color': '#5a6b85', 'line-style': 'dotted' } },
+  { selector: 'edge[kind = "SPAWNED"]', style: { 'line-color': '#8b7cf0', 'target-arrow-color': '#8b7cf0', 'line-style': 'dotted' } },
+  { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#4a6b95', 'target-arrow-color': '#4a6b95', 'line-style': 'dotted', width: 0.7 } },
   // ---- infrastructure edges (v0.4.0) --------------------------------------
-  { selector: 'edge[kind = "HOSTED_BY"]', style: { 'line-color': '#d9a03c', 'target-arrow-color': '#d9a03c', 'line-style': 'dashed', width: 1.2 } },
-  { selector: 'edge[kind = "EXPOSES"]', style: { 'line-color': '#2dd4bf', 'target-arrow-color': '#2dd4bf', 'line-style': 'dashed', width: 1.2 } },
-  { selector: 'edge[kind = "CONNECTED_TO"]', style: { 'line-color': '#64748b', 'target-arrow-color': '#64748b', 'line-style': 'dotted', width: 0.9 } },
-  { selector: 'edge[kind = "BACKED_BY"]', style: { 'line-color': '#d946ef', 'target-arrow-color': '#d946ef', 'line-style': 'dashed', width: 1.2 } },
+  { selector: 'edge[kind = "HOSTED_BY"]', style: { 'line-color': '#d9a03c', 'target-arrow-color': '#d9a03c', 'line-style': 'dashed', width: 1 } },
+  { selector: 'edge[kind = "EXPOSES"]', style: { 'line-color': '#2dd4bf', 'target-arrow-color': '#2dd4bf', 'line-style': 'dashed', width: 1 } },
+  { selector: 'edge[kind = "CONNECTED_TO"]', style: { 'line-color': '#55647a', 'target-arrow-color': '#55647a', 'line-style': 'dotted', width: 0.8 } },
+  { selector: 'edge[kind = "BACKED_BY"]', style: { 'line-color': '#d946ef', 'target-arrow-color': '#d946ef', 'line-style': 'dashed', width: 1 } },
   { selector: 'edge[?active]', style: { 'line-color': '#4a7fa0', 'target-arrow-color': '#4a7fa0' } },
   { selector: 'edge[?recent]', style: { 'line-color': '#5599b4', 'target-arrow-color': '#5599b4' } },
   // real observed traffic subtly brightens + thickens the edge; decays back
-  { selector: 'edge[?actLow]', style: { 'line-color': '#3d9cb8', 'target-arrow-color': '#3d9cb8', width: 1.6 } },
-  { selector: 'edge[?actMed]', style: { 'line-color': '#4dbcd8', 'target-arrow-color': '#4dbcd8', width: 2.1 } },
-  { selector: 'edge[?actHigh]', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 2.7 } },
-  { selector: 'edge.pulse', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 2.2 } },
-  { selector: 'edge.pulse-close', style: { 'line-color': '#ff5d5d', 'target-arrow-color': '#ff5d5d', width: 2.2 } },
+  { selector: 'edge[?actLow]', style: { 'line-color': '#3d9cb8', 'target-arrow-color': '#3d9cb8', width: 1.3 } },
+  { selector: 'edge[?actMed]', style: { 'line-color': '#4dbcd8', 'target-arrow-color': '#4dbcd8', width: 1.7 } },
+  { selector: 'edge[?actHigh]', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 2.2 } },
+  { selector: 'edge.pulse', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 1.8 } },
+  { selector: 'edge.pulse-close', style: { 'line-color': '#ff5d5d', 'target-arrow-color': '#ff5d5d', width: 1.8 } },
   { selector: 'edge.fading', style: { opacity: 0 } },
   { selector: 'node.fading', style: { opacity: 0 } },
   { selector: 'node.no-labels', style: { label: '' } }, // hide labels at low zoom
@@ -244,7 +281,7 @@ export const STYLESHEET: StylesheetStyle[] = [
   // render cheaply; edges thin out and subdue
   {
     selector: 'edge.lod-far',
-    style: { 'target-arrow-shape': 'none', 'arrow-scale': 0, opacity: 0.55 },
+    style: { 'target-arrow-shape': 'none', 'arrow-scale': 0, opacity: 0.35, width: 0.8 },
   },
   // synthetic TEST/BENCHMARK fixture nodes: same visual language, dashed
   // border marks them as non-real (never present in normal mode)
@@ -259,9 +296,9 @@ export const STYLESHEET: StylesheetStyle[] = [
   {
     selector: 'node[kind = "AI_RUNTIME"]',
     style: {
-      shape: 'hexagon', width: 118, height: 40, 'background-color': '#1c1430',
-      'border-color': '#8b5cf6', 'border-width': 1.6, color: '#e9d5ff',
-      'font-size': 8,
+      shape: 'hexagon', width: 92, height: 26, 'background-color': '#1c1430',
+      'border-color': '#8b5cf6', 'border-width': 1.3, color: '#e9d5ff',
+      'font-size': 10.5,
     },
   },
   {
@@ -325,8 +362,12 @@ interface EdgeActivityState {
   level: number
 }
 
-const ZOOM_FAR = 0.45
-const ZOOM_CLOSE = 0.95
+const ZOOM_FAR = 0.38
+const ZOOM_CLOSE = 0.8
+/** Initial overview floor: fit must never land below this zoom, so the
+ * opening view shows readable labels on a broad swath of the machine
+ * (v0.6.0 UI fidelity — "live machine map" first impression). */
+const OVERVIEW_MIN_ZOOM = 0.55
 
 // incremental-layout policy (v0.3.1): on large graphs, small node additions
 // must NOT trigger an expensive fcose pass over the whole graph. Above
@@ -1263,19 +1304,23 @@ export class GraphController {
       this.cy.nodes('[kind = "PROCESS"]').forEach((n) => {
         if (n.data('family')) return
         const name = String(n.data('name') ?? n.data('label') ?? '')
+        const pid = String(n.data('pid') ?? '')
         let label: string
         if (bucket === 'far') label = ''
-        else if (bucket === 'mid') label = name
+        else if (bucket === 'mid') label = `${name}\nPID ${pid}`
         else {
           const cpu = Number(n.data('cpu_percent') ?? 0)
           const mem = Math.round(Number(n.data('memory_mb') ?? 0))
-          label = `${name}\nPID ${String(n.data('pid') ?? '')} · CPU ${cpu.toFixed(1)}% · ${mem}MB`
+          label = `${name}\nPID ${pid} · ${cpu.toFixed(0)}%${mem > 0 ? ` · ${mem}MB` : ''}`
         }
         const key = `${bucket}:${label}`
         if (this.labelCache.get(n.id()) === key) return
         this.labelCache.set(n.id(), key)
         n.data('label', label)
       })
+      // near zoom: slightly larger detail cards (visual only — positions
+      // stay untouched by a style-only height change)
+      this.cy.nodes('[kind = "PROCESS"]').toggleClass('zoom-close', bucket === 'close')
     })
   }
 
@@ -1303,7 +1348,7 @@ export class GraphController {
 
   /** Far zoom = wireframe: translucent fills so dense clusters stay legible. */
   private updateCompactMode(): void {
-    const compact = this.cy.zoom() < 0.35
+    const compact = this.cy.zoom() < 0.3
     if (compact === this.compactMode) return
     this.compactMode = compact
     this.cy.batch(() => {
@@ -1555,28 +1600,38 @@ export class GraphController {
       randomize: kind === 'initial',
       animate,
       animationDuration: 350,
-      nodeRepulsion: kind === 'initial' ? 24000 : 6000,
-      idealEdgeLength: kind === 'initial' ? 185 : 110,
-      gravity: kind === 'initial' ? 0.05 : 0.2,
+      // v0.6.0 density tuning: tighter springs + stronger gravity pack the
+      // real machine map into a dense "nervous system" instead of a sparse
+      // canvas with huge empty gaps (organized chaos, not rigid tiling —
+      // repulsion/edge length tuned so clusters stay organic and edges
+      // remain visible between cards)
+      nodeRepulsion: kind === 'initial' ? 14000 : 5000,
+      idealEdgeLength: kind === 'initial' ? 125 : 85,
+      gravity: kind === 'initial' ? 0.1 : 0.25,
       numIter,
       // tiling arranges components into a rigid grid — off for an organic map
       tile: false,
-      padding: 30,
+      padding: 20,
       // incremental runs must not re-fit the view (keeps user's zoom/pan stable)
       fit: kind === 'initial',
     }
     const t0 = performance.now()
     try {
       const layout = this.cy.layout(options)
-      layout.run()
-      if (animate) {
-        layout.one('layoutstop', () => perf.recordLayout(performance.now() - t0))
-      } else {
+      let stopped = false
+      const onStop = (): void => {
+        if (stopped) return
+        stopped = true
         perf.recordLayout(performance.now() - t0)
+        if (kind === 'initial') this.fitOverview()
       }
+      layout.one('layoutstop', onStop)
+      layout.run()
+      if (!animate) onStop()
     } catch {
       this.cy.layout({ name: 'cose', animate: false } as never).run()
       perf.recordLayout(performance.now() - t0)
+      if (kind === 'initial') this.fitOverview()
     }
   }
 
@@ -1603,8 +1658,23 @@ export class GraphController {
     this.runLayout('initial')
   }
 
-  fit(): void {
+  /**
+   * Overview fit (v0.6.0): fit the graph, then clamp the zoom to a floor so
+   * the opening view never lands in the unlabeled far bucket — the user sees
+   * a broad, dense, readable overview immediately.
+   */
+  fitOverview(): void {
     this.cy.fit(undefined, 40)
+    if (this.cy.zoom() < OVERVIEW_MIN_ZOOM) {
+      this.cy.zoom({
+        level: OVERVIEW_MIN_ZOOM,
+        renderedPosition: { x: this.cy.width() / 2, y: this.cy.height() / 2 },
+      } as unknown as ZoomOptions)
+    }
+  }
+
+  fit(): void {
+    this.fitOverview()
   }
 
   zoomIn(): void {

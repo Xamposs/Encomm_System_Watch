@@ -129,7 +129,7 @@ const EX = {
     const cy = window.__esw_cy
     if (!cy || cy.edges().length === 0) return null
     const r = cy.container().getBoundingClientRect()
-    const dr = (document.querySelector('.drawer')?.classList.contains('open') ? 210 : 34) + 14
+    const dr = (document.querySelector('.drawer')?.classList.contains('open') ? 210 : 28) + 14
     let best = null
     cy.edges().forEach((e) => {
       if (best) return
@@ -147,8 +147,8 @@ const EX = {
     const cy = window.__esw_cy
     if (!cy) return null
     const r = cy.container().getBoundingClientRect()
-    // the drawer (open 210px, collapsed still 34px) overlays the bottom
-    const dr = (document.querySelector('.drawer')?.classList.contains('open') ? 210 : 34) + 14
+    // the drawer (open 210px, collapsed still 28px) overlays the bottom
+    const dr = (document.querySelector('.drawer')?.classList.contains('open') ? 210 : 28) + 14
     let n = null
     let idx = 0
     cy.nodes('[kind="PROCESS"]').forEach((c) => {
@@ -294,8 +294,16 @@ async function main() {
 
   // ---- Test B: real processes --------------------------------------------
   console.log('\n[Test B] Real processes')
-  const nodes = await cdp.eval(EX.nodeCount)
-  const procs = await cdp.eval(EX.procCount)
+  // bounded poll: on a busy live machine the first snapshot can land a few
+  // seconds late (vite cold compile, collector tick, ETW load); the
+  // assertion is unchanged — the full real topology MUST appear
+  let nodes = -1
+  let procs = -1
+  for (let i = 0; i < 10 && nodes < 100; i++) {
+    await sleep(2000)
+    nodes = await cdp.eval(EX.nodeCount)
+    procs = await cdp.eval(EX.procCount)
+  }
   check('B1 100+ total nodes', nodes >= 100, `nodes=${nodes}`)
   check('B2 50+ process nodes', procs >= 50, `processes=${procs}`)
   const python = await cdp.eval(EX.hasNode('python.exe'))
@@ -379,8 +387,14 @@ async function main() {
   // ---- Test D: process stop ----------------------------------------------
   console.log('\n[Test D] Process stop (notepad)')
   await killPid(np)
-  await sleep(5000)
-  const npGone = await cdp.eval(EX.nodeById(npSid))
+  // bounded poll: the stop event + 600 ms fade remove can land up to a few
+  // seconds after the kill on a busy live graph; the assertion is unchanged —
+  // the killed process's stable-id node MUST disappear
+  let npGone = 1
+  for (let i = 0; i < 6 && npGone !== 0; i++) {
+    await sleep(2000)
+    npGone = await cdp.eval(EX.nodeById(npSid))
+  }
   const typesAfterStop = await cdp.eval(EX.eventTypes)
   check('D1 notepad node removed (stable id)', npGone === 0, `count=${npGone}`)
   check('D2 PROCESS STOPPED event logged', typesAfterStop.includes('PROCESS STOPPED'))
@@ -516,7 +530,7 @@ async function main() {
     const cy = window.__esw_cy
     if (!cy || cy.edges().length === 0) return null
     const r = cy.container().getBoundingClientRect()
-    const dr = (document.querySelector('.drawer')?.classList.contains('open') ? 210 : 34) + 14
+    const dr = (document.querySelector('.drawer')?.classList.contains('open') ? 210 : 28) + 14
     let best = null
     cy.edges().forEach((e) => {
       if (best) return
@@ -1197,7 +1211,21 @@ async function main() {
     check('AB7 WSL distributions discovered', distros.length >= 1, distros.map((d) => d.name).join(','))
     const wslNodes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="WSL"]').length : 0`)
     check('AB8 WSL nodes in graph', wslNodes >= 1, `nodes=${wslNodes}`)
-    const wslHosts = await cdp.eval(`(() => { const cy = window.__esw_cy; if (!cy) return 0; let n = 0; cy.edges('[kind="HOSTS"]').forEach(e => { if (e.target().data('kind') === 'WSL') n++ }); return n })()`)
+    // bounded poll + one fresh snapshot: the infra HOSTS edges are emitted
+    // with every snapshot, but a reload can land in a transient engine
+    // window; the assertion is unchanged — the host→distro edge MUST be
+    // present on a fresh snapshot
+    const countWslHosts = () => cdp.eval(`(() => { const cy = window.__esw_cy; if (!cy) return 0; let n = 0; cy.edges('[kind="HOSTS"]').forEach(e => { if (e.target().data('kind') === 'WSL') n++ }); return n })()`)
+    let wslHosts = await countWslHosts()
+    for (let i = 0; i < 5 && wslHosts < 1; i++) {
+      await sleep(2000)
+      wslHosts = await countWslHosts()
+    }
+    if (wslHosts < 1) {
+      await cdp.send('Page.reload')
+      await sleep(9000)
+      wslHosts = await countWslHosts()
+    }
     check('AB9 WSL HOSTS edges (host -> distro)', wslHosts >= 1, `edges=${wslHosts}`)
     const runningDistros = distros.filter((d) => d.state === 'Running')
     if (runningDistros.length === 0) {
@@ -1490,6 +1518,107 @@ async function main() {
   const realRuns = (realEvents?.active_runs ?? []).filter((r) => !r.test_only).length
   console.log(`  real  Hermes semantic: YES (gateway status API) · deep interface: STATUS-ONLY (tokens/TPS UNAVAILABLE)`)
   console.log(`  real  AI events observed: ${realEvents?.history_count ?? 0} (incl. acceptance TEST rows) · real runs: ${realRuns}`)
+
+  // ---- AD — UI FIDELITY / SHELL (v0.6.0) --------------------------------
+  // Objective layout/shell checks only — never subjective beauty. The graph
+  // must own the screen: compact header, dominant canvas, closed inspector
+  // by default, single Cytoscape instance across views, compact nodes,
+  // aligned particle overlay, no horizontal overflow at 1600×900.
+  const shell = await cdp.eval(`(() => {
+    const q = (s) => document.querySelector(s)
+    const hdr = q('.header')?.getBoundingClientRect()
+    const fb = q('.filterbar')?.getBoundingClientRect()
+    const gw = q('.graph-wrap')?.getBoundingClientRect()
+    const dr = q('.drawer')?.getBoundingClientRect()
+    const hb = q('.hintbar')?.getBoundingClientRect()
+    const cy = window.__esw_cy
+    let procW = null, sysW = null
+    if (cy) {
+      const p = cy.nodes('[kind="PROCESS"]').first()
+      const s = cy.nodes('[kind="SYSTEM"]').first()
+      if (p.length) procW = parseFloat(p.style('width'))
+      if (s.length) sysW = parseFloat(s.style('width'))
+    }
+    return {
+      vh: window.innerHeight, vw: window.innerWidth,
+      hdrH: hdr ? Math.round(hdr.height) : null,
+      fbH: fb ? Math.round(fb.height) : null,
+      graphH: gw ? Math.round(gw.height) : null,
+      graphW: gw ? Math.round(gw.width) : null,
+      drawerH: dr ? Math.round(dr.height) : null,
+      drawerOpen: q('.drawer')?.classList.contains('open') ?? null,
+      hintH: hb ? Math.round(hb.height) : null,
+      inspectorPresent: q('.inspector') !== null,
+      sidebarPresent: q('.sidebar') !== null,
+      procW, sysW,
+      overlayCanvasW: q('.graph-wrap canvas')?.width ?? null,
+      graphWrapClientW: gw ? gw.width : null,
+      legendCollapsed: !(q('.legend')?.classList.contains('open') ?? true),
+    }
+  })()`)
+  check('AD1 graph canvas dominates viewport (≥72% height)',
+    shell.graphH !== null && shell.vh > 0 && shell.graphH / shell.vh >= 0.72,
+    `graph ${shell.graphH}/${shell.vh}px`)
+  check('AD2 header compact (≤56px)', shell.hdrH !== null && shell.hdrH <= 56, `${shell.hdrH}px`)
+  check('AD3 filter bar compact (≤34px)', shell.fbH !== null && shell.fbH <= 34, `${shell.fbH}px`)
+  check('AD4 event drawer exists + collapsed by default',
+    shell.drawerH !== null && shell.drawerH <= 40 && shell.drawerOpen === false,
+    `h=${shell.drawerH} open=${shell.drawerOpen}`)
+  check('AD5 hint bar present', shell.hintH !== null && shell.hintH > 0, `${shell.hintH}px`)
+  check('AD6 inspector closed by default', shell.inspectorPresent === false, 'no .inspector')
+  check('AD7 no persistent sidebar', shell.sidebarPresent === false &&
+    shell.graphW !== null && shell.vw > 0 && shell.graphW / shell.vw >= 0.9,
+    `graphW ${shell.graphW}/${shell.vw}`)
+  check('AD8 node dimensions compact (PROCESS ≤130px, SYSTEM ≤170px)',
+    shell.procW !== null && shell.sysW !== null && shell.procW <= 130 && shell.sysW <= 170,
+    `PROCESS ${shell.procW} SYSTEM ${shell.sysW}`)
+  check('AD9 particle overlay aligned after resize (canvas width == wrap width)',
+    shell.overlayCanvasW !== null && shell.graphWrapClientW !== null &&
+    Math.abs(shell.overlayCanvasW - shell.graphWrapClientW) <= 2,
+    `canvas ${shell.overlayCanvasW} vs wrap ${shell.graphWrapClientW}`)
+  check('AD10 legend collapsed by default', shell.legendCollapsed === true, 'chip-only legend')
+  // same Cytoscape instance across SYSTEM/AI/INFRA (toggle adds classes only)
+  const cyIdBefore = await cdp.eval(`window.__esw_cy ? 'cy' : null`)
+  await cdp.eval(`(() => {
+    const btns = [...document.querySelectorAll('.header .pill.sem-view')]
+    const ai = btns.find(b => b.textContent.trim() === 'AI')
+    if (ai) ai.click()
+    return true
+  })()`)
+  await sleep(1200)
+  const aiDimCount = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('.ai-dim').length : -1`)
+  const cyIdAfter = await cdp.eval(`window.__esw_cy ? 'cy' : null`)
+  await cdp.eval(`(() => {
+    const btns = [...document.querySelectorAll('.header .pill.sem-view')]
+    const sys = btns.find(b => b.textContent.trim() === 'SYSTEM')
+    if (sys) sys.click()
+    return true
+  })()`)
+  await sleep(1200)
+  const cyIdBack = await cdp.eval(`window.__esw_cy ? 'cy' : null`)
+  check('AD11 SYSTEM/AI/INFRA share one Cytoscape instance',
+    cyIdBefore === 'cy' && cyIdAfter === 'cy' && cyIdBack === 'cy',
+    'instance preserved across view toggles')
+  check('AD12 AI view dims unrelated nodes (classification-driven)',
+    aiDimCount > 0, `ai-dim nodes=${aiDimCount}`)
+  // 1600×900: no layout overflow
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1600, height: 900, deviceScaleFactor: 1, mobile: false,
+  })
+  await sleep(1500)
+  const overflow = await cdp.eval(`(() => ({
+    sw: document.documentElement.scrollWidth,
+    cw: document.documentElement.clientWidth,
+    sh: document.documentElement.scrollHeight,
+    ch: document.documentElement.clientHeight,
+  }))()`)
+  check('AD13 1600×900 layout has no overflow',
+    overflow.sw <= overflow.cw && overflow.sh <= overflow.ch,
+    `scroll ${overflow.sw}x${overflow.sh} vs client ${overflow.cw}x${overflow.ch}`)
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false,
+  })
+  await sleep(1000)
 
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact

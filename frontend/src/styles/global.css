@@ -40,17 +40,27 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 16px;
+  gap: 10px;
+  padding: 4px 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--panel-edge);
+  flex: 0 0 auto;
+  min-height: 34px;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   flex: 0 0 auto;
 }
 
 .brand-name {
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 3px;
+  letter-spacing: 2px;
   color: var(--text-bright);
+  white-space: nowrap;
 }
 
 .brand-name span {
@@ -58,16 +68,18 @@ body,
 }
 
 .brand-sub {
-  margin-top: 2px;
-  font-size: 9px;
-  letter-spacing: 2.5px;
+  font-size: 8px;
+  letter-spacing: 2px;
   color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .header-right {
   display: flex;
   align-items: center;
-  gap: 20px;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .stat-block {
@@ -77,10 +89,11 @@ body,
 }
 
 .stat-line {
-  font-size: 9px;
-  letter-spacing: 1.5px;
+  font-size: 8.5px;
+  letter-spacing: 1.2px;
   color: var(--text-dim);
   font-family: var(--mono);
+  white-space: nowrap;
 }
 
 .stat-num {
@@ -90,16 +103,17 @@ body,
 
 .stat-block.meta {
   border-left: 1px solid var(--panel-edge);
-  padding-left: 20px;
+  padding-left: 12px;
 }
 
 .conn-label {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 9.5px;
   font-weight: 700;
-  letter-spacing: 2px;
-  padding: 4px 10px;
+  letter-spacing: 1.5px;
+  padding: 2px 8px;
   border: 1px solid var(--panel-edge);
+  white-space: nowrap;
 }
 
 .conn-label.live {
@@ -125,29 +139,31 @@ body,
 
 .demo-badge {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 8.5px;
   font-weight: 700;
-  letter-spacing: 2px;
+  letter-spacing: 1.5px;
   color: var(--amber);
   border: 1px solid rgba(240, 166, 60, 0.5);
-  padding: 3px 8px;
+  padding: 2px 6px;
   background: rgba(240, 166, 60, 0.08);
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------- filter bar */
 .filterbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 16px;
+  gap: 8px;
+  padding: 3px 12px;
   background: #070b10;
   border-bottom: 1px solid var(--panel-edge);
   flex: 0 0 auto;
+  min-height: 26px;
 }
 
 .pills {
   display: flex;
-  gap: 4px;
+  gap: 3px;
 }
 
 .pill {
@@ -155,10 +171,11 @@ body,
   border: 1px solid var(--panel-edge);
   color: var(--text-dim);
   font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 1.5px;
-  padding: 4px 10px;
+  font-size: 8.5px;
+  letter-spacing: 1.2px;
+  padding: 2px 8px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .pill:hover {
@@ -177,9 +194,9 @@ body,
   border: 1px solid var(--panel-edge);
   color: var(--text-bright);
   font-family: var(--mono);
-  font-size: 11px;
-  padding: 4px 10px;
-  width: 220px;
+  font-size: 10px;
+  padding: 2px 8px;
+  width: 170px;
   outline: none;
 }
 
@@ -190,7 +207,7 @@ body,
 .view-controls {
   margin-left: auto;
   display: flex;
-  gap: 4px;
+  gap: 3px;
 }
 
 .icon-btn {
@@ -198,9 +215,9 @@ body,
   border: 1px solid var(--panel-edge);
   color: var(--text);
   font-family: var(--mono);
-  font-size: 12px;
-  width: 26px;
-  height: 24px;
+  font-size: 11px;
+  width: 22px;
+  height: 20px;
   cursor: pointer;
 }
 
@@ -214,10 +231,11 @@ body,
   border: 1px solid var(--panel-edge);
   color: var(--text);
   font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 1.5px;
-  padding: 4px 12px;
+  font-size: 8.5px;
+  letter-spacing: 1.2px;
+  padding: 2px 9px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .fit-btn:hover {
@@ -237,16 +255,16 @@ body,
   inset: 0;
 }
 
-/* near-black technical canvas: faint micro-grid + soft vignette, no bright
-   gradients — the graph itself is the dominant visual component */
+/* near-black technical canvas: faint micro-grid + sparse dot texture, no
+   bright gradients — the graph itself is the dominant visual component
+   (v0.6.0: flat control-room surface, reference-style) */
 .graph-canvas {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse at 50% 45%, rgba(24, 40, 60, 0.4), transparent 70%),
-    repeating-linear-gradient(0deg, rgba(53, 224, 255, 0.03) 0 1px, transparent 1px 44px),
-    repeating-linear-gradient(90deg, rgba(53, 224, 255, 0.03) 0 1px, transparent 1px 44px),
-    #04070b;
+    repeating-linear-gradient(0deg, rgba(53, 224, 255, 0.022) 0 1px, transparent 1px 48px),
+    repeating-linear-gradient(90deg, rgba(53, 224, 255, 0.022) 0 1px, transparent 1px 48px),
+    #06090f;
 }
 
 .graph-canvas::after {
@@ -254,8 +272,8 @@ body,
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background-image: radial-gradient(rgba(120, 160, 200, 0.05) 1px, transparent 1px);
-  background-size: 7px 7px;
+  background-image: radial-gradient(rgba(120, 160, 200, 0.04) 1px, transparent 1px);
+  background-size: 8px 8px;
 }
 
 /* rubber-band multi-select box (shift+drag) */
@@ -473,28 +491,56 @@ body,
 }
 
 /* ---------------------------------------------------------------- legend */
+/* Collapsed by default: a single tiny chip; clicking expands the full key.
+   The graph owns the screen — the legend is on-demand (v0.6.0). */
 .legend {
   position: absolute;
   left: 12px;
-  bottom: 12px;
+  bottom: 42px;
   z-index: 20;
   background: rgba(7, 11, 16, 0.85);
   border: 1px solid var(--panel-edge);
-  padding: 6px 10px;
+  padding: 4px 8px;
   font-family: var(--mono);
   font-size: 8.5px;
   letter-spacing: 1px;
   color: var(--text-dim);
-  display: flex;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.legend-rows {
+  display: none;
   flex-direction: column;
   gap: 3px;
-  pointer-events: none;
+  padding-top: 4px;
+}
+
+.legend.open .legend-rows {
+  display: flex;
+}
+
+.legend-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 1.5px;
+  white-space: nowrap;
+}
+
+.legend-toggle .drawer-arrow {
+  font-size: 8px;
 }
 
 .legend-row {
   display: flex;
   align-items: center;
   gap: 7px;
+  white-space: nowrap;
 }
 
 .lg-node { font-size: 10px; }
@@ -610,7 +656,7 @@ body,
   background: rgba(8, 12, 17, 0.97);
   border-top: 1px solid var(--panel-edge);
   transition: height 0.2s ease;
-  height: 34px;
+  height: 28px;
 }
 
 .drawer.open {
@@ -627,9 +673,9 @@ body,
   border-bottom: 1px solid var(--panel-edge);
   color: var(--text-dim);
   font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 2.5px;
-  padding: 8px 16px;
+  font-size: 8.5px;
+  letter-spacing: 2px;
+  padding: 6px 14px;
   cursor: pointer;
   text-align: left;
 }
@@ -648,7 +694,7 @@ body,
 }
 
 .drawer-body {
-  height: calc(100% - 34px);
+  height: calc(100% - 28px);
   overflow: hidden;
 }
 
@@ -701,6 +747,36 @@ body,
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 2px;
+}
+
+/* bottom interaction hint bar — restrained control-room help line (v0.6.0).
+   Absolute, sitting directly above the collapsed event drawer; the drawer
+   (z 30) covers it while expanded, matching the reference behavior. */
+.hintbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 28px;
+  z-index: 29;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 18px;
+  padding: 0 14px;
+  background: #070b10;
+  border-top: 1px solid var(--panel-edge);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 1px;
+  color: #46596b;
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.hintbar b {
+  color: #6b8299;
+  font-weight: 600;
 }
 
 /* scrollbars */

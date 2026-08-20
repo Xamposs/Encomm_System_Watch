@@ -44,6 +44,8 @@ export default function App() {
         aiMetrics={aiMetrics}
         aiProviders={aiProviders}
         aiFixture={aiFixture}
+        semanticView={semanticView}
+        onSemanticView={onSemanticViewChange}
       />
 
       <FilterBar
@@ -60,8 +62,6 @@ export default function App() {
           setViewMode(m)
           controllerRef.current?.setViewMode(m)
         }}
-        semanticView={semanticView}
-        onSemanticView={onSemanticViewChange}
         focusNode={focusNode}
         focusHops={focusHops}
         onFocusHops={(h) => {
@@ -111,6 +111,22 @@ export default function App() {
       {selectionCount === 1 && selected && (
         <Inspector node={selected} onClose={() => selectNode(null)} />
       )}
+
+      <div className="hintbar">
+        <b>READ ONLY</b>
+        <span>·</span>
+        <span>CLICK NODE INSPECT</span>
+        <span>·</span>
+        <span>SCROLL ZOOM</span>
+        <span>·</span>
+        <span>DRAG PAN</span>
+        <span>·</span>
+        <span>SHIFT+CLICK MULTISELECT</span>
+        <span>·</span>
+        <span>DBL-CLICK NODE FOCUS</span>
+        <span>·</span>
+        <span>FIT ALL BUTTON</span>
+      </div>
 
       <EventDrawer open={drawerOpen} onToggle={() => setDrawerOpen(!drawerOpen)} events={events} />
     </div>

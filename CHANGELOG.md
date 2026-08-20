@@ -2,6 +2,79 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.6.0] — 2026-08-20
+
+FINAL UI FIDELITY / CONTROL-ROOM VISUAL PASS (Phase 22 COMPLETE). The visual
+shell was rebuilt to match the supplied SYSTEM WATCH reference in character
+and composition — NOT pixel-perfect and never copying its branding: ENCOMM
+branding and this application's own functionality remain original. The
+observability engine is untouched: no new collectors, no ETW changes, no
+fabricated telemetry. Every particle still requires real evidence.
+
+### UI / visual (frontend only)
+
+- **Fullscreen graph-first shell** — the Cytoscape canvas now owns ~85% of
+  the viewport; no persistent side panels; the inspector is a temporary
+  right overlay, closed by default.
+- **Compact header** (~34 px) — ENCOMM SYSTEM WATCH + `LIVE · READ ONLY`,
+  SYSTEM/AI/INFRA tabs moved into the header as small technical buttons
+  (same single Cytoscape instance; toggling only adds dim classes), compact
+  status chips (PROC/CONN/LISTEN, CPU/RAM/FEED, NET source-labeled,
+  TRAFFIC tier chip).
+- **Dense node cards** — all node kinds scaled down ~30% (PROCESS 108×38,
+  SYSTEM 150×40, SERVICE 112×36, GPU 118×38, …), mono micro-typography
+  (11–13 px model), strict information hierarchy per zoom bucket:
+  FAR = label-free wireframe blocks · MID = `NAME` + `PID` · NEAR = PID,
+  CPU%, MEM. Tiny endpoint/port labels sit above their shapes.
+- **Fine curved wiring** — edges are hairline (1 px) `unbundled-bezier`
+  with a deterministic per-edge control point (`edgeCurveDist`), low idle
+  opacity (0.55), brighter/thicker only under real observed activity,
+  small arrowheads; far zoom drops arrow geometry and thins edges further.
+- **Organized-chaos density** — fcose retuned (nodeRepulsion 14000,
+  idealEdgeLength 125, gravity 0.10, padding 20) so hundreds of real
+  entities fit on screen at once with zero card overlap (measured 0 pairs
+  < 30 px) and visible edge routes between clusters.
+- **Initial camera** — fit now clamps to a 0.55 zoom floor: the opening
+  view is a broad, dense, readable overview (labels visible), never a
+  zoomed-out unlabeled haze.
+- **Label readability over wiring** — subtle dark text backing
+  (`text-background-opacity 0.55`) keeps dense lines from slicing through
+  card text.
+- **Reference shell details** — flat near-black canvas (#06090f) with a
+  faint 48 px micro-grid + 8 px dot texture (no vignette); legend collapsed
+  to a `▸ LEGEND` chip (on-demand); new 18 px bottom hint bar
+  (`READ ONLY · CLICK NODE INSPECT · SCROLL ZOOM · …`) above the thin
+  `LIVE EVENT DRAWER` strip (28 px collapsed / 210 px expanded).
+- **Live signals unchanged in truthfulness** — REAL DATA particles
+  (cyan/amber, actual bytes) and AI application signals (fuchsia diamonds,
+  proven telemetry) keep their evidence distinction; no decorative fake
+  motion was added.
+- **Performance preserved** — same graph instance, label cache, size-scaled
+  layout policy, bounded particles, bounded event DOM, idle rAF stop, edge
+  LOD; no box-shadows/blur/backdrop-filter on graph elements.
+
+### Fixed
+
+- **cytoscape 3.34 label default** — the bundle does not apply the
+  `data(label)` default mapping; labels are now explicitly mapped
+  (`label: 'data(label)'`), which is what makes every card render its
+  name/PID (previously cards could render blank at overview zoom).
+
+### Tests / acceptance
+
+- Acceptance: drawer overlay math updated for the 28 px collapsed strip;
+  new **AD — UI FIDELITY / SHELL** section (13 objective checks: graph
+  canvas ≥ 72 % viewport height, header ≤ 56 px, filter bar ≤ 34 px,
+  drawer collapsed by default, hint bar present, inspector closed by
+  default, no sidebar, compact node dimensions, particle-overlay alignment
+  after resize, legend collapsed, single Cytoscape instance across
+  SYSTEM/AI/INFRA, AI dimming, 1600×900 no overflow).
+- 3+ screenshot comparison iterations against the supplied reference
+  (1600×1000 CDP captures on the REAL live graph), final real-data
+  screenshot updated in `docs/screenshot.png`.
+- Backend tests: NOT REQUIRED (no backend/shared schema changes).
+- Phase 17 remains **FUNCTIONAL** (deep real producer telemetry pending).
+
 ## [0.5.0] — 2026-08-20
 
 REAL application-level AI telemetry checkpoint (Phase 17 FUNCTIONAL — real

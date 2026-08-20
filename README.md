@@ -12,7 +12,12 @@ virtual machines — all strictly read-only. Since v0.5.0 it carries **real
 application-level AI telemetry**: a normalized metadata pipeline fed by the
 Hermes gateway status API (read-only), an optional bounded localhost
 ingestion endpoint for explicit instrumentation, and an OpenTelemetry seam —
-with an explicit evidence boundary (see below).
+with an explicit evidence boundary (see below). Since v0.6.0 the visual
+shell is a **fullscreen control-room map**: the graph owns the screen —
+hundreds of compact labeled cards joined by fine curved wiring over a flat
+near-black canvas, a thin header with SYSTEM/AI/INFRA tabs, and a bottom
+LIVE EVENT DRAWER — with every node and edge still driven exclusively by
+real evidence (no fabricated activity, ever).
 
 > The graph is the product. This is **not** a traditional metrics dashboard.
 
