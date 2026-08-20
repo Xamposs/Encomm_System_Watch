@@ -32,10 +32,15 @@ export function fmtBps(v: number): string {
 
 /**
  * Deterministic per-edge curve offset (v0.6.0 UI fidelity): every edge gets a
- * stable, mildly different bezier control point derived from its id and its
- * endpoints' distance — fine technical wiring instead of rigid straight
- * flowchart lines. Pure function of element state (no cy mutation), so it is
- * safe inside a cytoscape style mapper.
+ * stable bezier control point. v1.0.2 topology composition: the curve is
+ * lane-aware — edges that share the same source band and target band (the
+ * x-columns of the composed rack map) bow in the SAME direction with a
+ * coordinated magnitude, so groups of real edges visibly travel shared
+ * corridors and fan out/in instead of one-random-curve-per-edge. A small
+ * per-edge deterministic jitter keeps them distinct (never a single thick
+ * fake line). Pure function of element state (no cy mutation), so it is
+ * safe inside a cytoscape style mapper; falls back to the v0.6.0 hash when
+ * composition data is absent (runtime-added edges).
  */
 function edgeCurveDist(e: EdgeSingular): number {
   const s = e.source().position()
@@ -44,6 +49,16 @@ function edgeCurveDist(e: EdgeSingular): number {
   const id = e.id()
   let h = 0
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
+  const sb = e.source().data('rackBand') as number | undefined
+  const tb = e.target().data('rackBand') as number | undefined
+  if (typeof sb === 'number' && typeof tb === 'number') {
+    // corridor lane: same source region + same target region => same sign &
+    // similar magnitude => parallel fan-out/fan-in; jitter keeps edges apart
+    const sign = tb >= sb ? 1 : -1
+    const lane = ((sb * 17 + tb * 29 + ((h >> 3) & 7)) % 6) - 3 // -3..2, stable
+    const base = Math.min(95, Math.max(26, len * 0.13))
+    return sign * (base + lane * 5 + ((h >> 7) & 3) * 2)
+  }
   const sign = h % 2 === 0 ? 1 : -1
   const d = Math.min(120, Math.max(30, len * 0.18))
   return sign * d
@@ -56,12 +71,12 @@ export const STYLESHEET: StylesheetStyle[] = [
       // cytoscape 3.34 does NOT apply the data(label) default mapping — an
       // explicit mapping is required or every card renders blank (v0.6.0)
       label: 'data(label)',
-      'background-color': '#141d2c',
-      'border-color': '#4a6a92',
-      'border-width': 1,
-      color: '#c4d8ec',
+      'background-color': '#0f1826',
+      'border-color': '#3d5a7e',
+      'border-width': 0.9,
+      color: '#b9cfe6',
       'font-family': 'Consolas, "Cascadia Mono", monospace',
-      'font-size': 12,
+      'font-size': 11.5,
       'text-valign': 'center',
       'text-halign': 'center',
       'text-wrap': 'wrap',
@@ -70,7 +85,7 @@ export const STYLESHEET: StylesheetStyle[] = [
       // subtle backing behind label text keeps dense wiring from slicing
       // through card text (reference control-room readability)
       'text-background-color': '#0a0f16',
-      'text-background-opacity': 0.55,
+      'text-background-opacity': 0.5,
       'text-background-padding': '2px',
       'overlay-color': '#22d3ee',
       'overlay-opacity': 0,
@@ -81,11 +96,11 @@ export const STYLESHEET: StylesheetStyle[] = [
   },
   {
     selector: 'node[kind = "PROCESS"]',
-    style: { shape: 'round-rectangle', width: 108, height: 38, 'border-color': '#5f83ad', 'border-width': 1 },
+    style: { shape: 'round-rectangle', width: 104, height: 36, 'border-color': '#46648c', 'border-width': 0.9 },
   },
   {
     selector: 'node[kind = "PROCESS"].zoom-close',
-    style: { 'font-size': 11, height: 44 },
+    style: { 'font-size': 11, height: 42 },
   },
   {
     selector: 'node[kind = "SYSTEM"]',
@@ -93,6 +108,32 @@ export const STYLESHEET: StylesheetStyle[] = [
       shape: 'round-rectangle', width: 150, height: 40, 'border-color': '#6f96c2',
       'border-width': 1.5, 'background-color': '#1b2f47', 'font-size': 13,
     },
+  },
+  // v1.0.2: banked node populations (stopped services / orphan processes).
+  // The 0-edge stopped-service population is composed into compact dim banks
+  // instead of scattering across the map — same truthful nodes, same counts,
+  // much lower visual weight (they remain clickable + fully inspectable).
+  {
+    selector: 'node.svc-bank',
+    style: {
+      width: 96, height: 26, 'font-size': 9.5,
+      'background-color': '#1a1506', 'border-color': '#8a6d2f', 'border-width': 0.9,
+      color: '#c9a76f', 'border-style': 'dashed', opacity: 0.8,
+      'text-background-opacity': 0.4,
+    },
+  },
+  {
+    selector: 'node.orphan-bank',
+    style: {
+      width: 92, height: 24, 'font-size': 9,
+      'background-color': '#0d1118', 'border-color': '#3c5780', 'border-width': 0.8,
+      color: '#8ba0ba', opacity: 0.65, 'text-background-opacity': 0.35,
+    },
+  },
+  // the connected core keeps slightly brighter edges to lead the eye
+  {
+    selector: 'node.core-node',
+    style: { 'border-color': '#5789bd', 'border-width': 1.15, 'background-color': '#132336' },
   },
   {
     selector: 'node[kind = "EXTERNAL_ENDPOINT"]',
@@ -211,6 +252,10 @@ export const STYLESHEET: StylesheetStyle[] = [
       'border-color': '#7fa8d4',
     },
   },
+  // AI/INFRA view dimming MUST live in the cytoscape stylesheet (canvas);
+  // a DOM CSS rule can never affect canvas-rendered elements (v1.0.2 fix)
+  { selector: 'node.ai-dim, edge.ai-dim', style: { opacity: 0.14 } },
+  { selector: 'edge.ai-dim', style: { opacity: 0.1 } },
   { selector: 'node[?born]', style: { 'border-color': '#35e0ff', 'border-width': 1.6 } },
   { selector: 'node[?highCpu]', style: { 'border-color': '#f0a63c' } },
   { selector: 'node[?inspected]', style: { 'border-color': '#35e0ff', 'border-width': 1.8, 'background-color': '#0f1c2c' } },
@@ -234,14 +279,14 @@ export const STYLESHEET: StylesheetStyle[] = [
     selector: 'edge',
     style: {
       'line-color': '#3a5a78',
-      width: 1,
+      width: 1.25,
       'curve-style': 'unbundled-bezier',
       'control-point-distances': (e) => edgeCurveDist(e as EdgeSingular),
       'control-point-weights': 0.5,
-      opacity: 0.55,
+      opacity: 0.82,
       'target-arrow-shape': 'triangle',
       'target-arrow-color': '#3a5a78',
-      'arrow-scale': 0.35,
+      'arrow-scale': 0.45,
       // invisible overlay widens the hover hit-area (tooltip friendliness)
       'overlay-color': '#35e0ff',
       'overlay-opacity': 0,
@@ -250,27 +295,28 @@ export const STYLESHEET: StylesheetStyle[] = [
       'transition-duration': '300ms' as unknown as number,
     },
   },
-  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#4e93ad', 'target-arrow-shape': 'none' } },
-  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#5f9660', 'target-arrow-shape': 'none', 'line-style': 'dashed', width: 0.9 } },
+  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#66c4de', 'target-arrow-shape': 'none', width: 1.2, opacity: 0.9 } },
+  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#6dbd70', 'target-arrow-shape': 'none', 'line-style': 'dashed', width: 1 } },
+  { selector: 'edge[kind = "EXTERNAL"]', style: { 'line-color': '#5f9ec9', 'target-arrow-color': '#5f9ec9', width: 1.2, opacity: 0.85 } },
   // ---- semantic edges (v0.3.0) -------------------------------------------
-  { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#34d399', 'target-arrow-color': '#34d399', 'line-style': 'dashed', width: 1.3 } },
-  { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', width: 1.3 } },
-  { selector: 'edge[kind = "LOCAL_API"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed' } },
-  { selector: 'edge[kind = "HOSTS"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 0.8 } },
+  { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#34d399', 'target-arrow-color': '#34d399', 'line-style': 'dashed', width: 1.4 } },
+  { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', width: 1.4 } },
+  { selector: 'edge[kind = "LOCAL_API"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 1.1 } },
+  { selector: 'edge[kind = "HOSTS"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 0.9 } },
   { selector: 'edge[kind = "PROCESS_PARENT"]', style: { 'line-color': '#5a6b85', 'target-arrow-color': '#5a6b85', 'line-style': 'dotted' } },
   { selector: 'edge[kind = "SPAWNED"]', style: { 'line-color': '#8b7cf0', 'target-arrow-color': '#8b7cf0', 'line-style': 'dotted' } },
-  { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#4a6b95', 'target-arrow-color': '#4a6b95', 'line-style': 'dotted', width: 0.7 } },
+  { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#4a6b95', 'target-arrow-color': '#4a6b95', 'line-style': 'dotted', width: 0.8 } },
   // ---- infrastructure edges (v0.4.0) --------------------------------------
-  { selector: 'edge[kind = "HOSTED_BY"]', style: { 'line-color': '#d9a03c', 'target-arrow-color': '#d9a03c', 'line-style': 'dashed', width: 1 } },
-  { selector: 'edge[kind = "EXPOSES"]', style: { 'line-color': '#2dd4bf', 'target-arrow-color': '#2dd4bf', 'line-style': 'dashed', width: 1 } },
-  { selector: 'edge[kind = "CONNECTED_TO"]', style: { 'line-color': '#55647a', 'target-arrow-color': '#55647a', 'line-style': 'dotted', width: 0.8 } },
-  { selector: 'edge[kind = "BACKED_BY"]', style: { 'line-color': '#d946ef', 'target-arrow-color': '#d946ef', 'line-style': 'dashed', width: 1 } },
-  { selector: 'edge[?active]', style: { 'line-color': '#4a7fa0', 'target-arrow-color': '#4a7fa0' } },
-  { selector: 'edge[?recent]', style: { 'line-color': '#5599b4', 'target-arrow-color': '#5599b4' } },
+  { selector: 'edge[kind = "HOSTED_BY"]', style: { 'line-color': '#e0a63e', 'target-arrow-color': '#e0a63e', 'line-style': 'dashed', width: 1.2 } },
+  { selector: 'edge[kind = "EXPOSES"]', style: { 'line-color': '#2dd4bf', 'target-arrow-color': '#2dd4bf', 'line-style': 'dashed', width: 1.1 } },
+  { selector: 'edge[kind = "CONNECTED_TO"]', style: { 'line-color': '#6a7f96', 'target-arrow-color': '#6a7f96', 'line-style': 'dotted', width: 0.9 } },
+  { selector: 'edge[kind = "BACKED_BY"]', style: { 'line-color': '#d946ef', 'target-arrow-color': '#d946ef', 'line-style': 'dashed', width: 1.1 } },
+  { selector: 'edge[?active]', style: { 'line-color': '#5ec9e8', 'target-arrow-color': '#5ec9e8' } },
+  { selector: 'edge[?recent]', style: { 'line-color': '#6fd4ee', 'target-arrow-color': '#6fd4ee' } },
   // real observed traffic subtly brightens + thickens the edge; decays back
-  { selector: 'edge[?actLow]', style: { 'line-color': '#3d9cb8', 'target-arrow-color': '#3d9cb8', width: 1.3 } },
-  { selector: 'edge[?actMed]', style: { 'line-color': '#4dbcd8', 'target-arrow-color': '#4dbcd8', width: 1.7 } },
-  { selector: 'edge[?actHigh]', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 2.2 } },
+  { selector: 'edge[?actLow]', style: { 'line-color': '#35b8d6', 'target-arrow-color': '#35b8d6', width: 1.5 } },
+  { selector: 'edge[?actMed]', style: { 'line-color': '#22d8f5', 'target-arrow-color': '#22d8f5', width: 2 } },
+  { selector: 'edge[?actHigh]', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 2.6 } },
   { selector: 'edge.pulse', style: { 'line-color': '#35e0ff', 'target-arrow-color': '#35e0ff', width: 1.8 } },
   { selector: 'edge.pulse-close', style: { 'line-color': '#ff5d5d', 'target-arrow-color': '#ff5d5d', width: 1.8 } },
   { selector: 'edge.fading', style: { opacity: 0 } },
@@ -435,6 +481,9 @@ export class GraphController {
   private safetyRecovered = false
   /** layout lifecycle state (surfaced by viewportHealth()) */
   private layoutState: 'idle' | 'active' = 'idle'
+  /** v1.0.2 rack composition shape (surfaced by topologyMetrics()) */
+  private rackColumns = 0
+  private rackRows = 0
   /** keeps the cytoscape renderer glued to the shell's final dimensions */
   private resizeObs: ResizeObserver | undefined
 
@@ -1540,8 +1589,9 @@ export class GraphController {
       })
     })
     if (this.pendingNewNodes > 0) {
+      const batch = this.pendingNewNodes
       this.pendingNewNodes = 0
-      this.runLayout('incremental')
+      this.runLayout('incremental', batch)
     }
   }
 
@@ -1608,69 +1658,240 @@ export class GraphController {
   }
 
   /**
-   * Layout policy (v0.3.1): initial layouts get a size-scaled iteration
-   * budget and no animation on very large graphs (animating 1500 nodes is
-   * janky for zero information). Incremental runs are debounced and gated
-   * by batch size (see scheduleIncrementalLayout) so the graph does not
-   * re-layout continuously as processes churn.
+   * v1.0.2 deterministic machine-map composition.
+   *
+   * Strategy (connection-aware, truthful): instead of trusting generic fcose
+   * to scatter a random cloud, the REAL graph structure is composed into a
+   * dense "wiring rack" — several narrow vertical bands (columns) of compact
+   * node stacks, with long-range real edges crossing between the bands.
+   *
+   * Ordering (never topology-flavored, always deterministic):
+   *   1. union-find connected components over the REAL edges
+   *   2. anchors (system/semantic/GPU/WSL/Docker/VM) lead the map
+   *   3. every connected node (degree > 0) follows, component-first, then
+   *      degree-descending — the connected core occupies the leading bands
+   *   4. stopped services -> compact dim service bank (right bands)
+   *   5. other zero-degree nodes -> compact orphan bank (last bands)
+   *   Within a band, nodes stack like rack entries (small vertical pitch).
+   * Column-major filling keeps bands narrow so the eye reads COLUMNS, not a
+   * broad cloud. Per-node deterministic hash jitter keeps it organic.
    */
-  private runLayout(kind: 'initial' | 'incremental'): void {
-    const n = this.cy.nodes().length
-    const numIter = n > 1500 ? 900 : n > 800 ? 1300 : 2000
-    const animate = kind !== 'initial' && n <= 800
-    const options = {
-      name: 'fcose',
-      quality: 'default',
-      randomize: kind === 'initial',
-      animate,
-      animationDuration: 350,
-      // v0.6.0 density tuning: tighter springs + stronger gravity pack the
-      // real machine map into a dense "nervous system" instead of a sparse
-      // canvas with huge empty gaps (organized chaos, not rigid tiling —
-      // repulsion/edge length tuned so clusters stay organic and edges
-      // remain visible between cards)
-      nodeRepulsion: kind === 'initial' ? 14000 : 5000,
-      idealEdgeLength: kind === 'initial' ? 125 : 85,
-      gravity: kind === 'initial' ? 0.1 : 0.25,
-      numIter,
-      // tiling arranges components into a rigid grid — off for an organic map
-      tile: false,
-      padding: 20,
-      // incremental runs must not re-fit the view (keeps user's zoom/pan stable)
-      fit: kind === 'initial',
+  private composeRackLayout(): void {
+    const cy = this.cy
+    const nodes = cy.nodes()
+    const n = nodes.length
+    if (n === 0) return
+    const edges = cy.edges()
+
+    // 1) union-find connected components over REAL edges (any edge kind =
+    //    a real relationship — semantic, infra, socket, parentage)
+    const parent = new Map<string, string>()
+    const compSize = new Map<string, number>()
+    const find = (x: string): string => {
+      let r = x
+      while (parent.get(r) !== r) r = parent.get(r)!
+      while (parent.get(x) !== x) { const p = parent.get(x)!; parent.set(x, r); x = p }
+      return r
     }
-    const t0 = performance.now()
-    this.layoutState = 'active'
-    try {
-      const layout = this.cy.layout(options)
-      let stopped = false
-      const onStop = (): void => {
-        if (stopped) return
-        stopped = true
-        this.layoutState = 'idle'
-        perf.recordLayout(performance.now() - t0)
-        // v1.0.1: the layoutstop EVENT is the single source of layout
-        // completion. The camera is fitted only here, on fcose's FINAL node
-        // positions. (The old `if (!animate) onStop()` manual call ran the
-        // fit before fcose reached usable positions on some paths and had to
-        // be bailed out by fcose's own internal fit — a race that produced
-        // the blank-graph camera on the user's machine.)
-        if (kind === 'initial') {
-          this.fitOverview()
-          this.safetyRecover()
-        }
+    const union = (a: string, b: string): void => {
+      const ra = find(a)
+      const rb = find(b)
+      if (ra === rb) return
+      if ((compSize.get(ra) ?? 1) < (compSize.get(rb) ?? 1)) {
+        parent.set(ra, rb)
+        compSize.set(rb, (compSize.get(ra) ?? 1) + (compSize.get(rb) ?? 1))
+      } else {
+        parent.set(rb, ra)
+        compSize.set(ra, (compSize.get(ra) ?? 1) + (compSize.get(rb) ?? 1))
       }
-      // register BEFORE run() so a synchronous layoutstop still lands here
-      layout.one('layoutstop', onStop)
-      layout.run()
-    } catch {
+    }
+    nodes.forEach((nd) => { parent.set(nd.id(), nd.id()); compSize.set(nd.id(), 1) })
+    const nodeIds = new Set(nodes.map((nd) => nd.id()))
+    edges.forEach((e) => {
+      // defensive: skip edges whose endpoints are not in the node set
+      // (a snapshot/event race can deliver an edge before its nodes land)
+      try {
+        const s0 = e.source().id()
+        const t0 = e.target().id()
+        if (!s0 || !t0 || !nodeIds.has(s0) || !nodeIds.has(t0)) return
+        union(s0, t0)
+      } catch { /* dangling edge — ignore for composition */ }
+    })
+
+    const degree = new Map<string, number>()
+    edges.forEach((e) => {
+      try {
+        const s0 = e.source().id()
+        const t0 = e.target().id()
+        if (!s0 || !t0) return
+        degree.set(s0, (degree.get(s0) ?? 0) + 1)
+        degree.set(t0, (degree.get(t0) ?? 0) + 1)
+      } catch { /* dangling edge — ignore for composition */ }
+    })
+    const compRank = new Map<string, number>()
+    const roots = [...compSize.keys()].sort((a, b) => (compSize.get(b) ?? 0) - (compSize.get(a) ?? 0))
+    roots.forEach((r, i) => compRank.set(r, i < 60 ? i : 61))
+
+    // 2) role classification (truthful: derived from node data, never invented)
+    const isAnchorKind = (kk: string): boolean =>
+      kk === 'SYSTEM' || kk === 'SEMANTIC' || kk === 'GPU' || kk === 'LOCAL_LLM' ||
+      kk === 'AI_RUNTIME' || kk === 'WSL' || kk === 'DOCKER_ENGINE' ||
+      kk === 'DOCKER_NETWORK' || kk === 'VM' || kk === 'CONTAINER'
+    const roleOf = (nd: NodeSingular): 'anchor' | 'core' | 'banked' | 'orphan' => {
+      const kk = String(nd.data('kind') ?? '')
+      if (isAnchorKind(kk)) return 'anchor'
+      const deg = degree.get(nd.id()) ?? 0
+      if (kk === 'SERVICE') {
+        return String(nd.data('status') ?? '') === 'running' && deg > 0 ? 'core' : 'banked'
+      }
+      if (kk === 'LISTENING_PORT' || kk === 'LOCAL_ENDPOINT' || kk === 'EXTERNAL_ENDPOINT') {
+        return deg > 0 ? 'core' : 'orphan'
+      }
+      return deg > 0 ? 'core' : 'orphan'
+    }
+
+    // 3) ordered, deterministic master lists (component-first, degree-desc,
+    //    then id — stable across snapshots)
+    const orderKey = (el: NodeSingular): [number, number, string] => {
+      const r = find(el.id())
+      const rank = compRank.get(r) ?? 62
+      return [rank, -(degree.get(el.id()) ?? 0), el.id()]
+    }
+    const byOrderKey = (a: NodeSingular, b: NodeSingular): number => {
+      const k1 = orderKey(a)
+      const k2 = orderKey(b)
+      if (k1[0] !== k2[0]) return k1[0] - k2[0]
+      if (k1[1] !== k2[1]) return k1[1] - k2[1]
+      return k1[2] < k2[2] ? -1 : 1
+    }
+    const byName = (a: NodeSingular, b: NodeSingular): number => {
+      const na = String(a.data('name') ?? a.id())
+      const nb = String(b.data('name') ?? b.id())
+      return na < nb ? -1 : na > nb ? 1 : 0
+    }
+    const anchors: NodeSingular[] = []
+    const coreN: NodeSingular[] = []
+    const banked: NodeSingular[] = []
+    const orphanN: NodeSingular[] = []
+    nodes.forEach((nd) => {
+      const role = roleOf(nd as NodeSingular)
+      if (role === 'anchor') anchors.push(nd as NodeSingular)
+      else if (role === 'core') coreN.push(nd as NodeSingular)
+      else if (role === 'banked') banked.push(nd as NodeSingular)
+      else orphanN.push(nd as NodeSingular)
+    })
+    anchors.sort(byOrderKey)
+    coreN.sort(byOrderKey)
+    banked.sort(byName)
+    orphanN.sort(byName)
+
+    // 4) column-major rack placement. Rows fill top-to-bottom per column;
+    //    columns go left-to-right. The connected core leads (left bands),
+    //    stopped services + orphans trail as compact banks (right bands).
+    //    Column count is chosen so the composed rack matches the CURRENT
+    //    viewport aspect (wide window -> more columns, tall -> fewer), so the
+    //    map fills the screen instead of letterboxing on either axis.
+    const PITCH_Y = 34
+    const PITCH_X = 150
+    const BANK_PITCH_X = 104
+    const viewAspect = cy.width() / Math.max(1, cy.height())
+    const base = Math.sqrt((n * PITCH_Y * viewAspect) / PITCH_X)
+    let cols = Math.max(1, Math.round(base))
+    let best = Math.abs((cols * PITCH_X) / (Math.max(1, Math.ceil(n / cols)) * PITCH_Y) - viewAspect)
+    for (let c = Math.max(1, Math.floor(base) - 4); c <= Math.ceil(base) + 4; c++) {
+      const rows = Math.max(1, Math.ceil(n / c))
+      const a = Math.abs((c * PITCH_X) / (rows * PITCH_Y) - viewAspect)
+      if (a < best) { best = a; cols = c }
+    }
+    const ROWS_PER_COLUMN = Math.max(1, Math.ceil(n / cols))
+    const strHash = (s: string): number => {
+      let h = 0
+      for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+      return h
+    }
+
+    const colOf = new Map<string, number>()
+    const rowOf = new Map<string, number>()
+    const roleOfNodeId = new Map<string, string>()
+    const colPitchOf = new Map<string, number>()
+    let colCursor = 0
+    let rowCursor = 0
+    const placeGroup = (groupList: NodeSingular[], role: string): void => {
+      const pitchX = role === 'banked' || role === 'orphan' ? BANK_PITCH_X : PITCH_X
+      for (const nd of groupList) {
+        roleOfNodeId.set(nd.id(), role)
+        colOf.set(nd.id(), colCursor)
+        rowOf.set(nd.id(), rowCursor)
+        colPitchOf.set(nd.id(), pitchX)
+        rowCursor += 1
+        if (rowCursor >= ROWS_PER_COLUMN) { colCursor += 1; rowCursor = 0 }
+      }
+      if (rowCursor > 0) colCursor += 1
+      rowCursor = 0
+    }
+    placeGroup(anchors, 'anchor')
+    placeGroup(coreN, 'core')
+    placeGroup(banked, 'banked')
+    placeGroup(orphanN, 'orphan')
+
+    // 5) write positions + composition metadata (deterministic)
+    cy.batch(() => {
+      nodes.forEach((nd) => {
+        const c = colOf.get(nd.id()) ?? 0
+        const r = rowOf.get(nd.id()) ?? 0
+        const px = colPitchOf.get(nd.id()) ?? PITCH_X
+        const h = strHash(nd.id())
+        const jx = ((h >> 4) % 9) - 4
+        const jy = ((h >> 7) % 9) - 4
+        nd.position({ x: c * px + jx, y: r * PITCH_Y + jy })
+        const role = roleOfNodeId.get(nd.id()) ?? ''
+        nd.data('rackBand', c)
+        nd.removeClass('svc-bank orphan-bank core-node')
+        if (role === 'banked') nd.addClass('svc-bank')
+        else if (role === 'orphan') nd.addClass('orphan-bank')
+        else if (role === 'core') nd.addClass('core-node')
+      })
+    })
+    this.rackColumns = colCursor
+    this.rackRows = Math.max(0, ROWS_PER_COLUMN)
+  }
+
+  /** Layout lifecycle (v1.0.2): the deterministic rack composition is the
+   * initial layout; fcose stays only for incremental churn (small batches
+   * keep their anchor positions on large graphs). */
+  private runLayout(kind: 'initial' | 'incremental', batch = 0): void {
+    if (kind === 'initial') {
+      const t0 = performance.now()
+      this.layoutState = 'active'
+      try {
+        this.composeRackLayout()
+      } catch (e) {
+        console.error('[v1.0.2] composeRackLayout failed', e)
+        ; (window as unknown as Record<string, unknown>).__esw_composeError = String(e)
+        // fallback: never leave the map empty
+        this.cy.layout({ name: 'cose', animate: false } as never).run()
+      }
       this.layoutState = 'idle'
-      this.cy.layout({ name: 'cose', animate: false } as never).run()
       perf.recordLayout(performance.now() - t0)
-      if (kind === 'initial') {
-        this.fitOverview()
-        this.safetyRecover()
+      this.fitOverview()
+      this.safetyRecover()
+      return
+    }
+    // incremental: small additions on any graph keep positions; on a large
+    // graph a real batch (>= threshold) may re-run the deterministic
+    // composition so the rack map stays coherent after meaningful churn
+    const n = this.cy.nodes().length
+    const large = n > LARGE_GRAPH_NODES
+    if (!large || batch >= Math.max(LARGE_GRAPH_MIN_BATCH, Math.round(n * 0.05))) {
+      const t0 = performance.now()
+      this.layoutState = 'active'
+      try {
+        this.composeRackLayout()
+      } catch {
+        this.cy.layout({ name: 'cose', animate: false } as never).run()
       }
+      this.layoutState = 'idle'
+      perf.recordLayout(performance.now() - t0)
     }
   }
 
@@ -1687,7 +1908,7 @@ export class GraphController {
           // positions — no full re-layout (preserves stability)
           return
         }
-        this.runLayout('incremental')
+        this.runLayout('incremental', batch)
       }
     }, 2000)
   }
@@ -1819,6 +2040,95 @@ export class GraphController {
         : null,
       containerWidth: W,
       containerHeight: H,
+      layoutState: this.layoutState,
+    }
+  }
+
+  /**
+   * v1.0.2 topology composition diagnostics (acceptance AG + debugging).
+   * Objective, truthful connectedness/structure metrics computed from the
+   * REAL rendered graph — never synthetic. Counts nodes/edges, connected
+   * components (union-find over real edges), and the composition shape.
+   */
+  topologyMetrics(): Record<string, unknown> {
+    const cy = this.cy
+    const nodes = cy.nodes()
+    const edges = cy.edges()
+    const nn = nodes.length
+    const ee = edges.length
+    const W = cy.width()
+    const H = cy.height()
+    // union-find over real edges
+    const parent = new Map<string, string>()
+    const compSize = new Map<string, number>()
+    const find = (x: string): string => {
+      let r = x
+      while (parent.get(r) !== r) r = parent.get(r)!
+      return r
+    }
+    const union = (a: string, b: string): void => {
+      const ra = find(a)
+      const rb = find(b)
+      if (ra === rb) return
+      if ((compSize.get(ra) ?? 1) < (compSize.get(rb) ?? 1)) {
+        parent.set(ra, rb); compSize.set(rb, (compSize.get(ra) ?? 1) + (compSize.get(rb) ?? 1))
+      } else {
+        parent.set(rb, ra); compSize.set(ra, (compSize.get(ra) ?? 1) + (compSize.get(rb) ?? 1))
+      }
+    }
+    nodes.forEach((nd) => { parent.set(nd.id(), nd.id()); compSize.set(nd.id(), 1) })
+    edges.forEach((e) => union(e.source().id(), e.target().id()))
+    // node metrics
+    const degree = new Map<string, number>()
+    edges.forEach((e) => {
+      degree.set(e.source().id(), (degree.get(e.source().id()) ?? 0) + 1)
+      degree.set(e.target().id(), (degree.get(e.target().id()) ?? 0) + 1)
+    })
+    let connectedNodes = 0
+    let viewportNodes = 0
+    let viewportEdges = 0
+    let viewportConnected = 0
+    nodes.forEach((nd) => {
+      const p = nd.renderedPosition()
+      if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) {
+        viewportNodes += 1
+        if ((degree.get(nd.id()) ?? 0) > 0) viewportConnected += 1
+      }
+      if ((degree.get(nd.id()) ?? 0) > 0) connectedNodes += 1
+    })
+    edges.forEach((e) => {
+      const a = e.source().renderedPosition()
+      const b = e.target().renderedPosition()
+      if (a.x >= 0 && a.x <= W && a.y >= 0 && a.y <= H &&
+        b.x >= 0 && b.x <= W && b.y >= 0 && b.y <= H) viewportEdges += 1
+    })
+    let largest = 0
+    for (const sz of compSize.values()) if (sz > largest) largest = sz
+    const svcBanked = cy.nodes('.svc-bank').length
+    const orphanBanked = cy.nodes('.orphan-bank').length
+    const coreClass = cy.nodes('.core-node').length
+    const visibleNodes = cy.nodes(':visible').length
+    const visibleEdges = cy.edges(':visible').length
+    return {
+      totalNodes: nn,
+      totalEdges: ee,
+      visibleNodes,
+      visibleEdges,
+      viewportNodes,
+      viewportEdges,
+      connectedNodes,
+      connectedFraction: nn > 0 ? Number((connectedNodes / nn).toFixed(3)) : 0,
+      viewportConnectedFraction: viewportNodes > 0 ? Number((viewportConnected / viewportNodes).toFixed(3)) : 0,
+      orphanNodes: nn - connectedNodes,
+      orphanFraction: nn > 0 ? Number(((nn - connectedNodes) / nn).toFixed(3)) : 0,
+      largestComponentSize: largest,
+      largestComponentFraction: nn > 0 ? Number((largest / nn).toFixed(3)) : 0,
+      serviceBanked: svcBanked,
+      orphanBanked,
+      coreClassNodes: coreClass,
+      rackColumns: this.rackColumns,
+      rackRows: this.rackRows,
+      zoom: cy.zoom(),
       layoutState: this.layoutState,
     }
   }

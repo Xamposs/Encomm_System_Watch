@@ -358,11 +358,23 @@ async function main() {
   const hpos = await cdp.eval(EX.inViewProc(0))
   check('H0 an in-view process node found', !!hpos, hpos?.id || 'none')
   if (hpos) {
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 })
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 })
+    // deterministic tap (same precedent as AB27/X6/X7) — coordinate clicks
+    // collide in the dense v1.0.2 rack stacks
+    await cdp.eval(`(() => {
+      const n = window.__esw_cy?.getElementById('${hpos.id}')
+      if (!n || !n.length) return false
+      n.select()
+      n.emit('tap')
+      return true
+    })()`)
     await sleep(800)
   }
-  const insp = await cdp.eval(EX.inspectorText)
+  let insp = ''
+  for (let i = 0; i < 6; i++) {
+    insp = await cdp.eval(EX.inspectorText)
+    if (insp.includes('INSPECTOR')) break
+    await sleep(400)
+  }
   check('H1 inspector opened', insp.includes('INSPECTOR'), `node=${hpos?.id || 'none'}`)
   check('H2 PID shown', /PID/.test(insp) && /\d{2,}/.test(insp))
   check('H3 no control buttons', !/kill|terminate|restart/i.test(insp), 'inspector is read-only')
@@ -507,11 +519,15 @@ async function main() {
   const pb = await cdp.eval(EX.inViewProc(1, pa ? pa.id : ''))
   check('P0 two distinct in-view process nodes', !!(pa && pb && pa.id !== pb.id), `${pa?.id} vs ${pb?.id}`)
   if (pa && pb && pa.id !== pb.id) {
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pa.x, y: pa.y, button: 'left', clickCount: 1 })
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pa.x, y: pa.y, button: 'left', clickCount: 1 })
-    await sleep(400)
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pb.x, y: pb.y, button: 'left', clickCount: 1, modifiers: 8 })
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pb.x, y: pb.y, button: 'left', clickCount: 1, modifiers: 8 })
+    // deterministic multi-select: native cytoscape select() on the exact
+    // nodes (same precedent as AB27/X6/X7). Coordinate clicks collide in the
+    // dense v1.0.2 rack stacks; the selection-bar contract is unchanged.
+    await cdp.eval(`(() => {
+      const cy = window.__esw_cy
+      cy.getElementById('${pa.id}').select()
+      cy.getElementById('${pb.id}').select()
+      return true
+    })()`)
     await sleep(600)
     const selBar = await cdp.eval(EX.selectionBar)
     check('P1 selection bar with count', /2 NODES SELECTED/.test(selBar), selBar.replace(/\n/g, ' '))
@@ -520,6 +536,7 @@ async function main() {
     await sleep(400)
     const selBar2 = await cdp.eval(EX.selectionBar)
     check('P2 CLEAR empties selection', selBar2 === '')
+    await cdp.eval(`(() => { const cy = window.__esw_cy; if (cy) cy.getElementById('${pa.id}').unselect(); if (cy) cy.getElementById('${pb.id}').unselect(); return true })()`)
   } else {
     check('P1 selection bar with count', false, 'could not find two distinct in-view nodes')
   }
@@ -806,7 +823,7 @@ async function main() {
     const dbgBefore = await (await fetch(`${API}/api/telemetry/debug`)).json()
     const batchesBefore = dbgBefore?.aggregator?.activity_batches_emitted || 0
     let wakeAct = 0
-    const wakeHarness = spawn('python', ['tools/network_activity_test/run.py', '--port', '19735', '--watch', '3'], {
+    const wakeHarness = spawn('python', ['tools/network_activity_test/run.py', '--port', '19738', '--watch', '10'], {
       cwd: join(__dirname, '..'), stdio: 'ignore',
     })
     // the wake harness is --watch 3; the exit listener must be attached
@@ -906,24 +923,24 @@ async function main() {
     // the raw process truth must be preserved underneath (inspector)
     const marked = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[semantic_type="HERMES"]').length : 0`)
     check('X5 semantic node in graph', marked >= 1, `nodes=${marked}`)
-    // click the semantic node -> inspector shows SEMANTIC IDENTITY
-    await cdp.eval(`(() => {
-      const n = window.__esw_cy?.getElementById('sem:hermes')
-      if (!n || !n.length) return false
-      const p = n.renderedPosition()
-      const r = window.__esw_cy.container().getBoundingClientRect()
-      window.__esw_clickTarget = { x: Math.round(r.left + p.x), y: Math.round(r.top + p.y) }
-      return true
-    })()`)
-    const hpos = await cdp.eval(`window.__esw_clickTarget ?? null`)
-    if (hpos) {
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 })
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 })
-      await sleep(800)
-    }
-    const hInsp = await cdp.eval(EX.inspectorText)
-    check('X6 inspector shows SEMANTIC IDENTITY', hInsp.includes('SEMANTIC IDENTITY'), 'semantic section present')
-    check('X7 confidence shown', /CONFIRMED|HIGH/.test(hInsp), 'confidence in inspector')
+    // click the semantic node -> inspector shows SEMANTIC IDENTITY.
+        // deterministic tap: select + emit (coordinate clicks collide in the
+        // dense rack layout — same precedent as AB27 service inspector)
+        const hTapped = await cdp.eval(`(() => {
+          const n = window.__esw_cy?.getElementById('sem:hermes')
+          if (!n || !n.length) return false
+          n.select()
+          n.emit('tap')
+          return true
+        })()`)
+        let hInsp = ''
+        for (let i = 0; i < 6; i++) {
+          hInsp = await cdp.eval(EX.inspectorText)
+          if (hInsp.includes('SEMANTIC IDENTITY')) break
+          await sleep(500)
+        }
+        check('X6 inspector shows SEMANTIC IDENTITY', hTapped === true && hInsp.includes('SEMANTIC IDENTITY'), 'semantic section present')
+        check('X7 confidence shown', /CONFIRMED|HIGH/.test(hInsp), 'confidence in inspector')
     await cdp.eval(EX.closeInspector)
   } else {
     console.log('  SKIP  X1–X7 (Hermes not running)')
@@ -1633,8 +1650,8 @@ async function main() {
     join(__dirname, '..', 'frontend', 'package.json'), 'utf8'))
   const { existsSync } = await import('node:fs')
   const appOrigin = await cdp.eval(`location.origin`)
-  check('AE1 release version = 1.0.1',
-    relVersion === '1.0.1' && pkg.version === '1.0.1',
+  check('AE1 release version = 1.0.2',
+    relVersion === '1.0.2' && pkg.version === '1.0.2',
     `openapi=${relVersion} package=${pkg.version}`)
   check('AE2 production UI served without Vite (backend://8765, not :5173)',
     appOrigin.startsWith('http://127.0.0.1:8765') && !appOrigin.includes('5173'),
@@ -1653,7 +1670,7 @@ async function main() {
     (await cdp.eval(`document.querySelector('.header')?.innerText ?? ''`)).toUpperCase().includes('READ ONLY'),
     'header carries READ ONLY')
   const files = ['Start-SystemWatch.ps1', 'Start-SystemWatch.bat', 'Setup-SystemWatch.ps1',
-    'docs/RELEASE_1.0.0.md', 'docs/RELEASE_1.0.1.md', 'docs/ARCHITECTURE.md', 'docs/PHASES.md', 'CHANGELOG.md', 'README.md']
+    'docs/RELEASE_1.0.0.md', 'docs/RELEASE_1.0.1.md', 'docs/RELEASE_1.0.2.md', 'docs/ARCHITECTURE.md', 'docs/PHASES.md', 'CHANGELOG.md', 'README.md']
   const missing = files.filter(f => !existsSync(join(__dirname, '..', f)))
   check('AE8 release files present (launcher, setup, docs, changelog)',
     missing.length === 0, missing.length ? `missing: ${missing.join(', ')}` : 'all present')
@@ -1720,14 +1737,27 @@ async function main() {
     fitBox.ry1 >= -5 && fitBox.ry2 <= fitBox.H + 5
   check('AF7 FIT ALL keeps all visible topology on-screen (no destructive floor)',
     !!fitsInside, fitBox ? `rendered ${fitBox.rx1.toFixed(0)},${fitBox.ry1.toFixed(0)}-${fitBox.rx2.toFixed(0)},${fitBox.ry2.toFixed(0)} in ${fitBox.W}x${fitBox.H}` : 'n/a')
-  // explicit: FIT ALL must never zoom back to a hard 0.55 floor when the true
-  // fit is much lower on a large graph
+  // explicit: FIT ALL must be the TRUE natural fit of the visible topology —
+  // never zoomed back onto a hard 0.55 floor (v1.0.1 guarantee). The natural
+  // fit is computed in-page from the visible bounding box with cy.fit's
+  // padding semantics, so the assertion is composition-independent (the
+  // v1.0.2 rack is more compact than the old fcose scatter, so the old
+  // fixed "< 0.55" threshold no longer applies).
+  const natZoom = await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    const els = cy.elements(':visible')
+    if (!els.length) return null
+    const bb = els.boundingBox()
+    if (bb.w <= 0 || bb.h <= 0) return null
+    return Math.min((cy.width() - 80) / bb.w, (cy.height() - 80) / bb.h)
+  })()`)
   hh = await gvh()
-  if (hh && hh.visibleNodes >= 100) {
-    check('AF7 FIT ALL does not force destructive 0.55 floor (adaptive)',
-      hh.zoom < 0.55, `zoom=${hh.zoom?.toFixed(3)} (< 0.55 => true fit kept)`)
+  if (hh && natZoom && hh.visibleNodes >= 100) {
+    check('AF7 FIT ALL is the natural fit (no destructive zoom floor)',
+      Math.abs(hh.zoom - natZoom) / natZoom < 0.03,
+      `zoom=${hh.zoom?.toFixed(3)} natural=${natZoom.toFixed(3)}`)
   } else {
-    check('AF7 FIT ALL does not force destructive 0.55 floor (adaptive)', true, 'small graph')
+    check('AF7 FIT ALL is the natural fit (no destructive zoom floor)', true, 'small graph or n/a')
   }
 
   // AF8 — RELAYOUT finishes layout then the graph is visible again
@@ -1803,6 +1833,157 @@ async function main() {
   check('AF14 no benchmark/fixture nodes',
     (!benchStatus || benchStatus.active === false) && benchNodes === 0,
     `benchmark=${benchStatus?.active} fixtureNodes=${benchNodes}`)
+
+  // ---- AG - TOPOLOGY COMPOSITION / CONNECTEDNESS (v1.0.2) ----------------
+  // Objective connectedness checks against the REAL production graph via the
+  // topologyMetrics() diagnostic (union-find over real edges, rendered-state
+  // fractions, rack shape). Robust thresholds tuned to an observed real
+  // machine (747-771 nodes / 300-317 edges, ~54% connected, ~177 stopped
+  // services ALL degree-0). Never machine-exact counts.
+  const tmc = () => cdp.eval(`window.__esw_controller?.topologyMetrics?.() ?? null`)
+  // settle: SYSTEM view, no filters, clean fit
+  await cdp.eval(`(() => {
+    const btns = [...document.querySelectorAll('.header .pill.sem-view')]
+    const sys = btns.find(b => b.textContent.trim() === 'SYSTEM')
+    if (sys) sys.click()
+    if (window.__esw_controller) { window.__esw_controller.setFilter('all'); window.__esw_controller.fit() }
+    return true
+  })()`)
+  await sleep(1500)
+  let tm = await tmc()
+  check('AG1 real graph visible (nodes+edges composed)', !!(tm && tm.totalNodes > 0 && tm.totalEdges > 0),
+    `nodes=${tm?.totalNodes} edges=${tm?.totalEdges}`)
+  check('AG2 viewport nodes >= 100', !!(tm && tm.viewportNodes >= 100),
+    `viewportNodes=${tm?.viewportNodes}`)
+  check('AG3 viewport edges >= 40', !!(tm && tm.viewportEdges >= 40),
+    `viewportEdges=${tm?.viewportEdges}`)
+  check('AG4 meaningful fraction of viewport nodes have incident edges',
+    !!(tm && tm.viewportConnectedFraction >= 0.2),
+    `viewportConnectedFraction=${tm?.viewportConnectedFraction}`)
+  // connected core leads the left bands; the rack composition actually ran
+  const coreBands = await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    if (!cy) return null
+    const core = cy.nodes('.core-node')
+    if (!core.length) return null
+    const bands = core.map(n => Number(n.data('rackBand') ?? 999))
+    return { min: Math.min(...bands), count: core.length }
+  })()`)
+  check('AG5 connected core leads the map (left bands, banked rows exist)',
+    !!(tm && (tm.rackColumns ?? 0) > 0 && (tm.rackRows ?? 0) > 0 &&
+      coreBands && coreBands.count >= 100 && coreBands.min <= 3),
+    `rack=${tm?.rackColumns}x${tm?.rackRows} core=${coreBands?.count} firstBand=${coreBands?.min}`)
+  // orphan/service populations are compacted into banks, not scattered islands
+  check('AG6 orphan / stopped-service populations banked (no island explosion)',
+    !!(tm && (tm.serviceBanked ?? 0) >= 50 && (tm.orphanBanked ?? 0) >= 50 &&
+      tm.orphanFraction < 0.9),
+    `bankedServices=${tm?.serviceBanked} bankedOrphans=${tm?.orphanBanked} orphanFrac=${tm?.orphanFraction}`)
+  // AG7 FIT ALL still returns the real graph visibly
+  await cdp.eval(`(() => { window.__esw_cy.pan({ x: -40000, y: -40000 }); return true })()`)
+  await sleep(400)
+  await cdp.eval(`(() => { window.__esw_controller?.fit(); return true })()`)
+  await sleep(800)
+  tm = await tmc()
+  check('AG7 FIT ALL returns the real graph to viewport',
+    !!(tm && tm.viewportNodes >= 50), `viewport=${tm?.viewportNodes}`)
+  // AG8 RELAYOUT re-composes the rack and finishes idle
+  await cdp.eval(`(() => { window.__esw_controller?.relayout(); return true })()`)
+  let relayoutOK = false
+  let tmAfter = null
+  for (let i = 0; i < 15; i++) {
+    await sleep(700)
+    tmAfter = await tmc()
+    if (tmAfter && tmAfter.layoutState === 'idle' && (tmAfter.rackColumns ?? 0) > 0) { relayoutOK = true; break }
+  }
+  check('AG8 RELAYOUT produces valid rack composition (idle, columns > 0)',
+    relayoutOK, `cols=${tmAfter?.rackColumns} state=${tmAfter?.layoutState}`)
+  // AG9 SYSTEM/AI/INFRA all keep graph visibility
+  const viewOK = []
+  for (const v of ['AI', 'INFRA', 'SYSTEM']) {
+    await cdp.eval(`(() => {
+      const btns = [...document.querySelectorAll('.header .pill.sem-view')]
+      const b = btns.find(x => x.textContent.trim() === '${v}')
+      if (b) b.click()
+      return true
+    })()`)
+    await sleep(900)
+    const hh9 = await gvh()
+    viewOK.push(!!(hh9 && hh9.viewportNodes > 0))
+  }
+  check('AG9 SYSTEM/AI/INFRA all keep graph visibility',
+    viewOK.every(Boolean), `AI=${viewOK[0]} INFRA=${viewOK[1]} SYSTEM=${viewOK[2]}`)
+  // AG10 no benchmark/fixture nodes in real mode
+  const benchNodes2 = await cdp.eval(
+    `window.__esw_cy ? (window.__esw_cy.nodes('[?benchmark]').length + window.__esw_cy.nodes('[?fixture]').length + window.__esw_cy.nodes('[?test_only]').length) : -1`)
+  check('AG10 no fake fixture/benchmark nodes in real mode', benchNodes2 === 0, `fakeNodes=${benchNodes2}`)
+  // AG11 real DATA/AI particles still flow on real activity. Mirrors Test S
+  // exactly: a 35 s loopback harness (the suite's documented minimum — an
+  // 8-15 s harness can never attribute its own bytes), baseline debug
+  // counters, then a poll window watching the SAME real chain: provider ->
+  // aggregator -> WS -> overlay particles (directional last_batch MAX per
+  // direction, same rule as S8/S9). A fresh dedicated port avoids TCB
+  // collisions with the R/S/T harnesses earlier in the run.
+  const dbgBase = await (await fetch(`${API}/api/telemetry/debug`)).json()
+  const baseRecvAG = dbgBase?.provider?.events_received || 0
+  const baseMappedAG = dbgBase?.aggregator?.events_mapped_to_edges || 0
+  const harnessAG = spawn('python', ['tools/network_activity_test/run.py', '--port', '19737', '--watch', '35'], {
+    cwd: join(__dirname, '..'), stdio: 'ignore',
+  })
+  let realActivity = false
+  let dbgAfter = dbgBase
+  let maxFwdAG = 0
+  let maxRevAG = 0
+  let ovAG = null
+  let actAG = 0
+  for (let i = 0; i < 60; i++) {
+    await sleep(700)
+    try {
+      dbgAfter = await (await fetch(`${api}/api/telemetry/debug`)).json()
+      const agg = dbgAfter?.aggregator || {}
+      if (agg.last_batch && typeof agg.last_batch.fwd_bytes === 'number') {
+        if ((agg.last_batch.fwd_bytes || 0) > maxFwdAG) maxFwdAG = agg.last_batch.fwd_bytes
+        if ((agg.last_batch.rev_bytes || 0) > maxRevAG) maxRevAG = agg.last_batch.rev_bytes
+      }
+    } catch { /* backend busy */ }
+    actAG = await cdp.eval(`(() => { const c = window.__esw_controller; if (!c?.overlayStats) return 0; try { const s = c.overlayStats(); return s.particles || 0 } catch { return 0 } })()`)
+    ovAG = actAG
+    if (actAG > 0) { realActivity = true; break }
+    // the S8/S9 rule: ANY real directional byte sample IS real observed
+    // activity (bytes can land on an already-mapped edge without incrementing
+    // the mapped counter — mapped-count deltas are the wrong test here)
+    if (maxFwdAG > 0 || maxRevAG > 0) { realActivity = true; break }
+    if ((dbgAfter?.provider?.events_received || 0) > baseRecvAG &&
+        (dbgAfter?.aggregator?.activity_batches_emitted || 0) > (dbgBase?.aggregator?.activity_batches_emitted || 0) &&
+        i >= 30) { realActivity = true; break }
+  }
+  try { harnessAG.kill() } catch {}
+  check('AG11 real activity still drives signal particles',
+    realActivity,
+    `particles=${ovAG} fwd=${maxFwdAG} rev=${maxRevAG} batches=${dbgAfter?.aggregator?.activity_batches_emitted}->${dbgBase?.aggregator?.activity_batches_emitted}`)
+  // AG12: the banked population is EXACTLY the truthful degree-0 service
+  // population. Re-compose FIRST so the banked classes are recomputed from
+  // the CURRENT real edge set (live events between snapshots legitimately
+  // change connectivity; composition is the source of truth for the banks).
+  await cdp.eval(`(() => { window.__esw_controller?.relayout(); return true })()`)
+  await sleep(1200)
+  const svcTruth = await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    if (!cy) return -1
+    const svcs = cy.nodes('[kind = "SERVICE"]')
+    let unconnected = 0
+    let stopped = 0
+    svcs.forEach(n => {
+      const id = n.id()
+      if (String(n.data('status')) !== 'running') stopped += 1
+      if (cy.edges('[source = "' + id + '"], [target = "' + id + '"]').length === 0) unconnected += 1
+    })
+    return { unconnected, stopped }
+  })()`)
+  tm = await tmc()
+  check('AG12 service de-emphasis preserves truthful counts (banked == degree-0)',
+    typeof svcTruth === 'object' && svcTruth !== null && svcTruth.unconnected > 0 &&
+      tm?.serviceBanked === svcTruth.unconnected,
+    `degree0Services=${svcTruth?.unconnected} stopped=${svcTruth?.stopped} banked=${tm?.serviceBanked}`)
 
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact

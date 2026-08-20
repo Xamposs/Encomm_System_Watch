@@ -2,6 +2,49 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [1.0.2] — 2026-08-20
+
+VISUAL TOPOLOGY FIDELITY RELEASE — frontend-only composition/routing pass.
+No observability semantics, data model, collectors, or backend behavior were
+changed; no synthetic nodes/edges were added; telemetry truthfulness is
+untouched (banked stopped services keep their exact truthful counts and
+remain fully clickable/inspectable).
+
+### Added
+- **Connection-aware rack composition** — the initial layout is no longer a
+  generic force-directed scatter. Real graph structure (union-find connected
+  components over real edges) drives a deterministic "wiring rack": anchors
+  and the connected core lead the left bands (component-first, degree-desc
+  ordering), stopped services and unconnected populations trail as compact
+  dim banks on the right. Column count is solved per viewport aspect so the
+  map fills the screen at any window size.
+- **Lane-aware edge routing / bundling feel** — edges sharing the same source
+  and target rack band bow in the same direction with coordinated magnitude
+  (deterministic per-edge jitter keeps them distinct; never a fused fake
+  line), producing fan-out/fan-in corridors without inventing edges.
+- **AG topology acceptance section** (AG1–AG12) — objective connectedness
+  gates: viewport nodes/edges, incident-edge fraction, connected-core
+  placement, orphan bank compaction, FIT ALL / RELAYOUT re-validated, view
+  keep-visible, no fake nodes, real particles on real activity, truthful
+  banked-service counts.
+
+### Changed
+- Edge presence is more visually dominant: base opacity 0.55→0.82, wider
+  color-coded category edges, brighter active/recent traffic lanes; nodes
+  recede (darker fills, thinner borders, tighter cards).
+- Stopped services / orphan populations: compact `svc-bank` / `orphan-bank`
+  styling in the default SYSTEM view — same nodes, same counts, far lower
+  visual weight.
+- AI/INFRA view dimming now lives in the Cytoscape stylesheet (canvas); the
+  old DOM-CSS-only rule could never affect canvas elements (silent no-op).
+- Incremental re-composition now also triggers on meaningful live batches on
+  large graphs (the batch arg is actually forwarded).
+
+### Fixed
+- `composeRackLayout` hardened against dangling-edge snapshot/event races
+  (edge present before its endpoint nodes land) — the rack can no longer
+  silently fall back to a scatter layout on live churn.
+
 ## [1.0.1] — 2026-08-20
 
 CRITICAL UI HOTFIX (released after v1.0.0). v1.0.0's automated acceptance was

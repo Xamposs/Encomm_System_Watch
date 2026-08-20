@@ -383,7 +383,10 @@ layers, ETW, GPU, semantics, AI telemetry pipeline) with **Phase 17
 FUNCTIONAL** (deep tokens/TPS/tool-call telemetry awaits a safe producer
 interface) and **Phase 23 COMPLETE** (v1.0.0 release / packaging — install
 script, production launcher, release docs, tagged) with **v1.0.1** — a critical
-UI hotfix that restored real graph visibility (camera/layout fix).
+UI hotfix that restored real graph visibility (camera/layout fix) and
+**v1.0.2** — a visual topology composition / edge-routing fidelity release
+(connection-aware rack layout, lane-aware edge bundling, compact service
+banks; no observability changes).
 
 ## Repository
 
