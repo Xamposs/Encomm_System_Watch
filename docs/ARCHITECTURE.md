@@ -488,13 +488,14 @@ USES_GPU edges               (process sid → gpu:<index>, evidence-backed)
 - One failed detector (NVML missing, API timeout, parser exception) degrades
   only that detector — core monitoring continues.
 
-## Future AI-agent telemetry (Phase 17 — NOT STARTED)
+## Phase 17 in this document
 
-The schema already accommodates the next layer. The v0.3.0 semantic layer
-ships the seams: detector registry, evidence model, semantic nodes/edges,
-change-only events, AI view. Deep agent telemetry (tool calls, tokens, TPS,
-context usage, latency, reasoning) is intentionally NOT fabricated — it
-waits for a real existing interface to expose it.
+Phase 17 is **FUNCTIONAL** since v0.5.0: the real application-level AI
+telemetry pipeline (providers, bounded buffer, WS channels, ingestion) is
+implemented and verified with the REAL Hermes gateway status adapter — see
+section 12 below. Deep tokens/TPS/tool-call telemetry remains UNAVAILABLE
+(401-protected/not exposed) and is truthfully reported as such; it requires
+a safe producer interface, not estimation.
 
 ## 10. Large-graph benchmark mode + ETW health (v0.3.1)
 

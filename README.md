@@ -19,6 +19,11 @@ near-black canvas, a thin header with SYSTEM/AI/INFRA tabs, and a bottom
 LIVE EVENT DRAWER — with every node and edge still driven exclusively by
 real evidence (no fabricated activity, ever).
 
+> **Primary platform: Windows 11.** Core features (processes, services, ETW,
+> WSL, Docker Desktop, Windows-local GPU/VM integrations) are Windows
+> features. Other operating systems are NOT part of the v1.0.0 support
+> promise.
+
 > The graph is the product. This is **not** a traditional metrics dashboard.
 
 ```text
@@ -57,39 +62,79 @@ detections that are actually present)*
 
 ## Quick start (Windows 11)
 
-Requirements: **Python 3.11+**, **Node.js 18+** (Node 22 recommended).
+Prerequisites:
+- **Python 3.11+** (backend)
+- **Node.js 18+** (Node 22 recommended) — only needed to build the frontend
+  from source
+- **NVIDIA driver** with NVML support for GPU telemetry (optional)
+- **Administrator PowerShell** for full TIER2 per-edge ETW telemetry
+  (optional; non-admin runs fine and reports TIER0 truthfully)
 
 ```powershell
-# one-time setup
-cd "C:\Users\xampos\Desktop\Encomm SYSTEM WATCH"
-cd backend ; python -m venv .venv ; .\.venv\Scripts\python.exe -m pip install -r requirements.txt ; cd ..
-cd frontend ; npm install ; cd ..
+# FIRST TIME / FRESH CLONE — one-time setup (venv + deps + production build)
+.\Setup-SystemWatch.ps1
 
-# development launcher (starts backend + frontend, localhost only)
-powershell -ExecutionPolicy Bypass -File .\start-dev.ps1
+# RUN — production mode, one backend process serving the built UI
+# (elevated PowerShell = full TIER2 ETW; non-admin = truthful TIER0)
+.\Start-SystemWatch.ps1
 
-# → frontend  http://localhost:5173   (Vite dev server, proxies /api and /ws)
-# → backend   http://127.0.0.1:8765   (FastAPI + collector loop)
+# OPEN
+#   http://127.0.0.1:8765
+# (the launcher opens the default browser unless you pass -NoBrowser)
 ```
 
-### Manual startup
+The launcher prints the live capability state on start, e.g.:
+
+```text
+ENCOMM SYSTEM WATCH 1.0.0
+--------------------------------
+Backend:   http://127.0.0.1:8765   (localhost only)
+Administrator: YES | ETW: TIER2 / ACTIVE
+Mode:      LIVE
+UI:        http://127.0.0.1:8765
+Read-only: YES
+```
+
+**Non-admin behavior:** the app starts and works fully (processes, services,
+topology, GPU, semantic/infra views); only per-edge byte telemetry degrades
+to TIER0 (socket lifecycle + adapter totals). The launcher never auto-elevates
+— it reports the state and tells you to launch from an elevated PowerShell
+for full ETW.
+
+A `Start-SystemWatch.bat` convenience wrapper is included
+(`Start-SystemWatch.bat -NoBrowser` works too).
+
+### Optional capabilities
+
+| Feature                   | Required                                |
+|---------------------------|-----------------------------------------|
+| Process monitoring        | Windows 11                              |
+| TCP/UDP topology          | Windows (elevation uncovers more PIDs)  |
+| ETW per-edge traffic      | Administrator + Windows                 |
+| NVIDIA GPU telemetry      | NVIDIA GPU + driver (NVML)              |
+| WSL monitoring            | WSL installed (stopped distros stay stopped) |
+| Docker monitoring         | Docker Desktop installed/running        |
+| Hyper-V monitoring        | Hyper-V installed                       |
+| VMware monitoring         | VMware Workstation installed            |
+| VirtualBox monitoring     | VirtualBox installed                    |
+| Hermes semantics          | Hermes running                          |
+| LM Studio semantics       | LM Studio running                       |
+| AI runtime telemetry      | Hermes gateway running (status API)     |
+
+Docker/WSL/VMware/VirtualBox are OPTIONAL capabilities — nothing is required
+to run the core app beyond Windows 11, Python and (for building) Node.js.
+
+### Manual fallback
 
 ```powershell
-# backend (terminal 1)
+# backend (serves frontend/dist when present) — terminal 1
 cd backend
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765
 
-# frontend (terminal 2)
+# frontend dev server (optional, for frontend development only) — terminal 2
 cd frontend
 npm run dev
-```
-
-### Production-style single process
-
-```bash
-cd frontend && npm run build     # → frontend/dist
-cd ../backend && .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765
-# open http://127.0.0.1:8765  (backend serves the built UI)
+# → http://localhost:5173  (Vite dev server, proxies /api and /ws)
 ```
 
 ## Architecture
@@ -305,12 +350,26 @@ real-machine detections.
 
 ## Known limitations
 
+- **Full ETW requires Administrator privileges.** Per-edge byte telemetry
+  (TIER2) needs an elevated backend; a non-admin backend truthfully reports
+  TIER0 (socket lifecycle + adapter totals). SYSTEM WATCH never auto-elevates.
+- **Stale ETW sessions after abnormal termination.** If the backend is
+  hard-killed (not Ctrl+C), its `esw-telemetry` ETW session can linger and
+  degrade edge attribution for the next run. The launcher detects it and
+  prints the exact `logman stop esw-telemetry -ets` cleanup command; it never
+  stops sessions automatically.
 - **Connection establishment ≠ packet traffic.** Pulses fire on real
-  `CONNECTION_OPENED/CLOSED` events from socket-table diffs. Real
-  per-edge byte traffic (direction + bytes + PID per connection) comes
-  from the elevated ETW Tier 2 provider (v0.2.2+, metadata only — never
-  payloads); without an elevated backend only lifecycle and adapter
-  totals are shown.
+  `CONNECTION_OPENED/CLOSED` events from socket-table diffs. Real per-edge
+  byte traffic (direction + bytes + PID per connection) comes from the
+  elevated ETW Tier 2 provider (metadata only — never payloads).
+- **Phase 17 deep Hermes metrics are unavailable.** Tokens, TPS, tool names
+  and MCP-call telemetry would require a safe authenticated producer
+  interface; the app reports exactly `UNAVAILABLE`, never estimates.
+- **Stopped WSL distros are intentionally not started** for inspection; only
+  already-running distros get a bounded summary.
+- **Docker / VM collectors report truthful unavailable/skipped states**
+  when that software is not installed or not active — they never fabricate.
+- **Windows 11 focused.** Only Windows is a v1.0.0 support promise.
 - Windows exposes limited parent-of-socket information; unpaired loopback
   sockets appear as `LOCAL_ENDPOINT` nodes rather than guessed pairs.
 - The full-metadata first pass takes ~8s on a busy desktop; steady-state
@@ -319,10 +378,11 @@ real-machine detections.
 
 ## Roadmap
 
-See [docs/PHASES.md](docs/PHASES.md) — Phases 1–19 functional (GPU + AI
-semantic observability 14/15/16/18 COMPLETE in v0.3.0); Windows Services,
-Docker/WSL, large-graph optimization and Phase 17 deep AI-agent telemetry
-(tool calls, tokens/TPS/latency) are designed-for and scheduled next.
+See [docs/PHASES.md](docs/PHASES.md) — Phases 1–22 complete (all observability
+layers, ETW, GPU, semantics, AI telemetry pipeline) with **Phase 17
+FUNCTIONAL** (deep tokens/TPS/tool-call telemetry awaits a safe producer
+interface) and **Phase 23 COMPLETE** (v1.0.0 release / packaging — install
+script, production launcher, release docs, tagged).
 
 ## Repository
 

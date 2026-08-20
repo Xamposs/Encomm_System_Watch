@@ -1620,6 +1620,47 @@ async function main() {
   })
   await sleep(1000)
 
+  // ---- AE - RELEASE / PACKAGING (v1.0.0) ------------------------------------
+  // Objective checks for the v1.0 release gates, run against the same live
+  // instance. Uses the backend REST surface (already on 127.0.0.1:8765).
+  const api = 'http://127.0.0.1:8765'
+  const openapi = await (await fetch(`${api}/openapi.json`)).json()
+  const relVersion = openapi.info?.version
+  const telemetry = await (await fetch(`${api}/api/telemetry`)).json()
+  const bench = await (await fetch(`${api}/api/benchmark/status`)).json()
+  const ai = await (await fetch(`${api}/api/ai-telemetry`)).json()
+  const pkg = JSON.parse(await (await import('node:fs/promises')).readFile(
+    join(__dirname, '..', 'frontend', 'package.json'), 'utf8'))
+  const { existsSync } = await import('node:fs')
+  const appOrigin = await cdp.eval(`location.origin`)
+  check('AE1 release version = 1.0.0',
+    relVersion === '1.0.0' && pkg.version === '1.0.0',
+    `openapi=${relVersion} package=${pkg.version}`)
+  check('AE2 production UI served without Vite (backend://8765, not :5173)',
+    appOrigin.startsWith('http://127.0.0.1:8765') && !appOrigin.includes('5173'),
+    `origin=${appOrigin}`)
+  check('AE3 localhost-only bind (127.0.0.1:8765)',
+    appOrigin.includes('127.0.0.1') && api.startsWith('http://127.0.0.1:'),
+    'backend reachable on 127.0.0.1 only')
+  check('AE4 benchmark disabled (TEST-ONLY off)',
+    bench.active === false, `active=${bench.active}`)
+  check('AE5 AI fixture disabled (REAL mode)',
+    ai.fixture_mode === false, `fixture_mode=${ai.fixture_mode}`)
+  check('AE6 telemetry capability reported truthfully (TIER0 or TIER2)',
+    typeof telemetry.level === 'string' && telemetry.level.startsWith('TIER'),
+    `level=${telemetry.level} readiness=${telemetry.readiness}`)
+  check('AE7 READ ONLY marker present in header',
+    (await cdp.eval(`document.querySelector('.header')?.innerText ?? ''`)).toUpperCase().includes('READ ONLY'),
+    'header carries READ ONLY')
+  const files = ['Start-SystemWatch.ps1', 'Start-SystemWatch.bat', 'Setup-SystemWatch.ps1',
+    'docs/RELEASE_1.0.0.md', 'docs/ARCHITECTURE.md', 'docs/PHASES.md', 'CHANGELOG.md', 'README.md']
+  const missing = files.filter(f => !existsSync(join(__dirname, '..', f)))
+  check('AE8 release files present (launcher, setup, docs, changelog)',
+    missing.length === 0, missing.length ? `missing: ${missing.join(', ')}` : 'all present')
+  check('AE9 single healthy instance behind 127.0.0.1:8765',
+    (await (await fetch(`${api}/api/health`)).json()).status === 'ok',
+    'health ok on the production URL')
+
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact
   await cdp.send('Emulation.setDeviceMetricsOverride', {

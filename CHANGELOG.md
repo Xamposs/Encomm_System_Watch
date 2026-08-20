@@ -2,6 +2,65 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [1.0.0] — 2026-08-20
+
+FIRST STABLE RELEASE (Phase 23 COMPLETE — release / packaging). The validated
+v0.6.0 control-room observatory is now a clean, reproducible, documented
+v1.0.0: the same real-data engine, wrapped in a production install/start
+workflow and release documentation.
+
+### Release / packaging
+
+- **Canonical production launcher** — `Start-SystemWatch.ps1` (plus a thin
+  `Start-SystemWatch.bat` wrapper): resolves the project directory (path
+  spaces safe), verifies the venv and the production build, single-instance
+  port check (a healthy existing instance is reported, never duplicated; a
+  foreign listener fails safely without killing anything), stale
+  `esw-telemetry` ETW session warning (detected and explained, never
+  stopped automatically), no auto-elevation (Administrator state reported
+  truthfully; non-admin gets the TIER0 explanation), backend child output
+  captured to `backend\esw-backend.log` so startup failures are
+  diagnosable, live capability banner (`Mode: LIVE`, `ETW: TIER0/TIER2`,
+  `Read-only: YES`, UI URL), optional `-NoBrowser`, and clean shutdown of
+  only the processes it started.
+- **One-time setup script** — `Setup-SystemWatch.ps1`: creates
+  `backend\.venv`, installs backend dependencies, `npm ci`, production
+  build. It never installs system software, edits the firewall, changes
+  Windows security, touches Docker/WSL/hypervisors/GPU drivers, enables
+  Windows features, or auto-elevates — missing prerequisites are explained.
+- **Version 1.0.0** — FastAPI app version, `frontend/package.json` and
+  `frontend/package-lock.json`.
+- **Release docs** — `docs/RELEASE_1.0.0.md` (what it is, capabilities,
+  platform, quick start, limitations, security, validation);
+  README rewritten quick start (Setup → Start → open), Windows-11-primary
+  platform statement, optional-capabilities matrix, expanded known
+  limitations; PHASES.md gains Phase 23; ARCHITECTURE corrected (Phase 17
+  no longer listed as NOT STARTED — it is FUNCTIONAL since v0.5.0).
+- **Consistency audit** — viewport claims unified on a single descriptive
+  measurement (~85 % canvas in CHANGELOG/PHASES; acceptance AD uses a
+  ≥72 % objective floor); benchmark/fixture modes remain explicitly
+  TEST-ONLY and opt-in; release starts in REAL mode with no synthetic
+  state.
+
+### v1.0.0 carries forward (unchanged engine, all real)
+
+- Graph-first control-room UI (fullscreen Cytoscape canvas, SYSTEM/AI/INFRA
+  views, live event drawer, inspector, search/filters/family grouping)
+- Windows processes + services + TCP/UDP topology
+- REAL Windows ETW TIER2 per-edge bytes + directional DATA particles
+- NVIDIA GPU/NVML telemetry
+- Hermes / LM Studio / MCP semantic detection with evidence-backed confidence
+- Real application-level AI telemetry pipeline (Hermes gateway status API,
+  OTEL seam, optional local ingestion — Phase 17 FUNCTIONAL)
+- WSL / Docker / Hyper-V / VMware / VirtualBox read-only observability
+- 2000-node validated benchmark mode + long-run bounded memory
+- Read-only / metadata-only guarantees — zero control surfaces
+
+VALIDATION: backend 262 passed / 0 failed; frontend typecheck + build PASS;
+full acceptance 213 passed / 0 failed (+ release AE checks); real-machine
+REAL validation green; launcher + setup scripts verified from a
+spaces-containing path.
+
 ## [0.6.0] — 2026-08-20
 
 FINAL UI FIDELITY / CONTROL-ROOM VISUAL PASS (Phase 22 COMPLETE). The visual
