@@ -29,7 +29,7 @@ export default function App() {
 
   const onSemanticViewChange = (v: SemanticView) => {
     setSemanticView(v)
-    controllerRef.current?.setSemanticView(v === 'ai')
+    controllerRef.current?.setView(v)
   }
 
   return (

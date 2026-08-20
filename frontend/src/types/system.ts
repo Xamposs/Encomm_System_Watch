@@ -7,6 +7,13 @@ export type NodeKind =
   | 'SEMANTIC'
   | 'LOCAL_LLM'
   | 'GPU'
+  // ---- infrastructure observability (v0.4.0) ----
+  | 'SERVICE'
+  | 'WSL'
+  | 'DOCKER_ENGINE'
+  | 'CONTAINER'
+  | 'DOCKER_NETWORK'
+  | 'VM'
 export type EdgeKind =
   | 'LOCALHOST'
   | 'EXTERNAL'
@@ -18,6 +25,11 @@ export type EdgeKind =
   | 'SPAWNED'
   | 'HOSTS'
   | 'MEMBER_OF'
+  // ---- infrastructure relationships (v0.4.0) ----
+  | 'HOSTED_BY'
+  | 'EXPOSES'
+  | 'CONNECTED_TO'
+  | 'BACKED_BY'
 export type EventType =
   | 'PROCESS_STARTED'
   | 'PROCESS_STOPPED'
@@ -36,10 +48,22 @@ export type EventType =
   | 'GPU_PROCESS_ATTACHED'
   | 'GPU_PROCESS_DETACHED'
   | 'ETW_HEALTH'
+  // ---- infrastructure events (v0.4.0, change-only) ----
+  | 'SERVICE_STARTED'
+  | 'SERVICE_STOPPED'
+  | 'SERVICE_STATUS_CHANGED'
+  | 'CONTAINER_STARTED'
+  | 'CONTAINER_STOPPED'
+  | 'CONTAINER_CREATED'
+  | 'CONTAINER_REMOVED'
+  | 'WSL_STATE_CHANGED'
+  | 'VM_DETECTED'
+  | 'VM_LOST'
+  | 'VM_STATE_CHANGED'
 export type Filter = 'all' | 'active' | 'listening' | 'highcpu'
 export type ConnectionStatus = 'connecting' | 'live' | 'disconnected'
 export type ViewMode = 'nodes' | 'families'
-export type SemanticView = 'system' | 'ai'
+export type SemanticView = 'system' | 'ai' | 'infra'
 export type Mode = 'live' | 'demo' | 'benchmark'
 
 export interface TopoNode {
@@ -105,6 +129,19 @@ export interface SemanticSummary {
   gpu: GpuInfo[]
 }
 
+/** Compact infrastructure summary for header chips (v0.4.0). */
+export interface InfraSummary {
+  services: { total: number; running: number; stopped: number }
+  wsl: { distributions: number; running: number }
+  docker: {
+    available: boolean
+    engine: string
+    containers: number
+    running: number
+  }
+  vms: { total: number; running: number; providers: string[] }
+}
+
 export interface Stats {
   processes: number
   active_conns: number
@@ -117,6 +154,7 @@ export interface Stats {
   net?: NetStats | null
   gpu?: GpuInfo[]
   semantic?: SemanticSummary
+  infra?: InfraSummary
 }
 
 /** TEST-ONLY benchmark snapshot metadata (only present in benchmark mode). */
@@ -169,6 +207,7 @@ export type ServerMessage =
       edges: TopoEdge[]
       gpu?: GpuInfo[]
       semantic?: SemanticSummary
+      infra?: InfraSummary
       benchmark?: BenchmarkMeta
     }
   | { type: 'events'; data: SystemEvent[] }

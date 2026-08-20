@@ -26,6 +26,18 @@ const TYPE_LABEL: Record<EventType, string> = {
   GPU_PROCESS_ATTACHED: 'GPU PROCESS ATTACHED',
   GPU_PROCESS_DETACHED: 'GPU PROCESS DETACHED',
   ETW_HEALTH: 'ETW HEALTH',
+  // ---- infrastructure events (v0.4.0) ----
+  SERVICE_STARTED: 'SERVICE STARTED',
+  SERVICE_STOPPED: 'SERVICE STOPPED',
+  SERVICE_STATUS_CHANGED: 'SERVICE STATUS',
+  CONTAINER_STARTED: 'CONTAINER STARTED',
+  CONTAINER_STOPPED: 'CONTAINER STOPPED',
+  CONTAINER_CREATED: 'CONTAINER CREATED',
+  CONTAINER_REMOVED: 'CONTAINER REMOVED',
+  WSL_STATE_CHANGED: 'WSL STATE',
+  VM_DETECTED: 'VM DETECTED',
+  VM_LOST: 'VM LOST',
+  VM_STATE_CHANGED: 'VM STATE',
 }
 
 const TYPE_CLASS: Record<EventType, string> = {
@@ -46,6 +58,18 @@ const TYPE_CLASS: Record<EventType, string> = {
   GPU_PROCESS_ATTACHED: 'ev-gpu',
   GPU_PROCESS_DETACHED: 'ev-gpu-detach',
   ETW_HEALTH: 'ev-etw-health',
+  // ---- infrastructure events (v0.4.0) ----
+  SERVICE_STARTED: 'ev-service',
+  SERVICE_STOPPED: 'ev-service',
+  SERVICE_STATUS_CHANGED: 'ev-service',
+  CONTAINER_STARTED: 'ev-container',
+  CONTAINER_STOPPED: 'ev-container',
+  CONTAINER_CREATED: 'ev-container',
+  CONTAINER_REMOVED: 'ev-container',
+  WSL_STATE_CHANGED: 'ev-wsl',
+  VM_DETECTED: 'ev-vm',
+  VM_LOST: 'ev-vm',
+  VM_STATE_CHANGED: 'ev-vm',
 }
 
 /**
@@ -88,6 +112,21 @@ function describe(ev: SystemEvent): string {
       return `${m.name ?? `PID ${m.pid ?? '?'}`} (PID ${m.pid ?? '?'}) left GPU ${m.gpu_index ?? '?'}`
     case 'ETW_HEALTH':
       return `${m.state ?? '?'} · ${m.message ?? ''}`
+    case 'SERVICE_STARTED':
+    case 'SERVICE_STOPPED':
+    case 'SERVICE_STATUS_CHANGED':
+      return `${m.display_name ?? m.name ?? '?'} → ${String(m.status ?? '?').toUpperCase()}${typeof m.pid === 'number' ? ` · PID ${m.pid}` : ''}`
+    case 'CONTAINER_STARTED':
+    case 'CONTAINER_STOPPED':
+    case 'CONTAINER_CREATED':
+    case 'CONTAINER_REMOVED':
+      return `${m.name ?? '?'} (${m.image ?? '?'}) → ${String(m.state ?? '?').toUpperCase()}`
+    case 'WSL_STATE_CHANGED':
+      return `${m.distro ?? '?'} → ${String(m.state ?? '?')}${typeof m.version === 'number' ? ` · WSL${m.version}` : ''}`
+    case 'VM_DETECTED':
+    case 'VM_LOST':
+    case 'VM_STATE_CHANGED':
+      return `${m.name ?? 'VIRTUALIZATION PROCESS'} · ${m.provider ?? '?'} → ${String(m.state ?? '?')}`
   }
 }
 

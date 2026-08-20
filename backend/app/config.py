@@ -39,6 +39,11 @@ class Settings:
     gpu_metrics_interval_s: float = 1.0    # overall GPU metrics
     gpu_pid_interval_s: float = 2.0        # GPU PID attribution
     gpu_enabled: bool = True
+    # ---- infrastructure observability (v0.4.0) ----------------------------
+    infra_services_interval_s: float = 4.0   # Windows services poll
+    infra_wsl_interval_s: float = 5.0        # WSL distro state poll
+    infra_docker_interval_s: float = 3.0     # Docker engine poll
+    infra_vm_interval_s: float = 4.0         # VM poll
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -60,4 +65,8 @@ class Settings:
             gpu_metrics_interval_s=float(os.environ.get("ESW_GPU_METRICS_INTERVAL_S", "1.0")),
             gpu_pid_interval_s=float(os.environ.get("ESW_GPU_PID_INTERVAL_S", "2.0")),
             gpu_enabled=_env_bool("ESW_GPU_ENABLED", True),
+            infra_services_interval_s=float(os.environ.get("ESW_INFRA_SERVICES_INTERVAL_S", "4.0")),
+            infra_wsl_interval_s=float(os.environ.get("ESW_INFRA_WSL_INTERVAL_S", "5.0")),
+            infra_docker_interval_s=float(os.environ.get("ESW_INFRA_DOCKER_INTERVAL_S", "3.0")),
+            infra_vm_interval_s=float(os.environ.get("ESW_INFRA_VM_INTERVAL_S", "4.0")),
         )

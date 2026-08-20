@@ -27,6 +27,7 @@ from .services.diff_engine import DiffEngine
 from .services.event_stream import EventStream
 from .services.benchmark_graph import BenchmarkMode
 from .services.etw_health import EtwAttributionHealth
+from .services.infra import InfraEngine
 from .services.semantic import (
     EVENT_GPU_PROCESS_ATTACHED,
     EVENT_GPU_PROCESS_DETACHED,
@@ -78,6 +79,28 @@ diff_engine = DiffEngine(cfg)
 gpu_collector = GpuCollector() if (cfg.gpu_enabled and not cfg.demo_mode) else None
 detector_registry = SemanticDetectorRegistry(cfg)
 semantic_engine = SemanticEngine(cfg)
+
+# ---- infrastructure observability (v0.4.0) --------------------------------
+# Windows Services + WSL + Docker + VMs. READ-ONLY collectors; every
+# platform degrades independently (Docker down, WSL absent, no hypervisor
+# -> that section unavailable only). Skipped entirely in demo mode so the
+# synthetic data path never mixes with real host discovery.
+if not cfg.demo_mode:
+    from .collectors.docker import DockerCollector
+    from .collectors.services import ServicesCollector
+    from .collectors.vm import VmCollector
+    from .collectors.wsl import WslCollector
+
+    services_collector = ServicesCollector()
+    wsl_collector = WslCollector()
+    docker_collector = DockerCollector()
+    vm_collector = VmCollector()
+else:
+    services_collector = None  # type: ignore[assignment]
+    wsl_collector = None  # type: ignore[assignment]
+    docker_collector = None  # type: ignore[assignment]
+    vm_collector = None  # type: ignore[assignment]
+infra_engine = InfraEngine(cfg)
 
 # ---- network telemetry ----------------------------------------------------
 telemetry_enabled = cfg.telemetry_enabled and not cfg.demo_mode
@@ -227,6 +250,7 @@ def _stats_dict() -> dict:
     base["net"] = net
     base["gpu"] = _state.get("gpu", [])
     base["semantic"] = semantic_engine.summary()
+    base["infra"] = infra_engine.summary()
     return base
 
 
@@ -255,10 +279,15 @@ def _snapshot_message() -> dict:
         }
     topo = _state.get("topology")
     if topo is not None:
-        nodes = [n.to_dict() for n in semantic_engine.augment_process_nodes(list(topo.nodes.values()))]
+        tnodes: list[TNode] = list(topo.nodes.values())
+        tnodes = semantic_engine.augment_process_nodes(tnodes)
+        tnodes = infra_engine.augment_process_nodes(tnodes)
+        nodes = [n.to_dict() for n in tnodes]
         nodes += [n.to_dict() for n in semantic_engine.semantic_nodes()]
+        nodes += [n.to_dict() for n in infra_engine.nodes()]
         edges = [e.to_dict() for e in topo.edges.values()]
         edges += [e.to_dict() for e in semantic_engine.semantic_edges()]
+        edges += [e.to_dict() for e in infra_engine.edges()]
     else:
         nodes, edges = [], []
     return {
@@ -271,6 +300,7 @@ def _snapshot_message() -> dict:
         "edges": edges,
         "gpu": _state.get("gpu", []),
         "semantic": semantic_engine.summary(),
+        "infra": infra_engine.summary(),
     }
 
 
@@ -481,6 +511,106 @@ async def _gpu_loop() -> None:
         await asyncio.sleep(cfg.gpu_metrics_interval_s)
 
 
+async def _infra_loop() -> None:
+    """Windows Services / WSL / Docker / VM polling (v0.4.0).
+
+    Each collector runs on its own interval (staggered), all inside one
+    task so the main 1 s collect loop is never touched. Every collector is
+    failure-isolated: a broken platform degrades that section only.
+    Change-only events are emitted by the InfraEngine (first sample is the
+    baseline — no startup storm). Benchmark mode suppresses forwarding so
+    synthetic and real data never mix.
+    """
+    if infra_engine is None or services_collector is None:
+        return
+    from .collectors.docker import DockerState
+    from .collectors.vm import VmState
+    from .collectors.wsl import WslState
+
+    # last-good state holders: a transient collector failure must NEVER wipe
+    # the graph to "not installed / engine UNKNOWN" — a stale-but-truthful
+    # snapshot (error text set) beats a false empty one.
+    last_wsl = WslState()
+    last_docker = DockerState()
+    last_vm = VmState()
+    last_services: list = []
+    last = {"services": 0.0, "wsl": 0.0, "docker": 0.0, "vm": 0.0}
+    while True:
+        try:
+            now = time.time()
+            snap = _state.get("snapshot")
+            topo = _state.get("topology")
+            gpu_state = _state.get("gpu", [])
+            services: list = []
+            wsl_state = None
+            docker_state = None
+            vm_state = None
+
+            if snap is not None and topo is not None and now - last["services"] >= cfg.infra_services_interval_s:
+                last["services"] = now
+                try:
+                    collected, _ = await asyncio.to_thread(services_collector.collect)
+                    if collected:
+                        services = collected
+                        last_services = collected
+                    else:
+                        # an empty enumeration is NOT a legit services state
+                        # (Windows always has services) — keep last good
+                        services = last_services
+                except Exception:  # noqa: BLE001 — services must never kill
+                    services = last_services
+            else:
+                services = last_services
+            if now - last["wsl"] >= cfg.infra_wsl_interval_s:
+                last["wsl"] = now
+                try:
+                    wsl_state = await asyncio.to_thread(wsl_collector.collect)
+                except Exception:  # noqa: BLE001 — WSL must never kill the app
+                    wsl_state = None
+            if now - last["docker"] >= cfg.infra_docker_interval_s:
+                last["docker"] = now
+                try:
+                    docker_state = await asyncio.to_thread(docker_collector.collect)
+                except Exception:  # noqa: BLE001 — Docker must never kill the app
+                    docker_state = None
+            if now - last["vm"] >= cfg.infra_vm_interval_s:
+                last["vm"] = now
+                try:
+                    vm_state = await asyncio.to_thread(vm_collector.collect)
+                except Exception:  # noqa: BLE001 — VM detection must never kill
+                    vm_state = None
+
+            if wsl_state is None or (wsl_state.error and not wsl_state.installed):
+                # thrown OR returned a failure signature (empty enumeration +
+                # error) — never let a transient WSL-service hiccup wipe the
+                # graph to "not installed"; keep the last good observation
+                last_wsl.error = wsl_state.error if wsl_state else (
+                    "wsl collector failed — showing last good state")
+                wsl_state = last_wsl
+            else:
+                last_wsl = wsl_state
+            if docker_state is None:
+                last_docker.error = "docker collector failed — showing last good state"
+                docker_state = last_docker
+            else:
+                last_docker = docker_state
+            if vm_state is None:
+                last_vm.error = "vm collector failed — showing last good state"
+                vm_state = last_vm
+            else:
+                last_vm = vm_state
+
+            events = infra_engine.update(
+                services, wsl_state, docker_state, vm_state,
+                snap, topo, gpu_state,
+            ) if (snap is not None and topo is not None) else []
+            if events and not benchmark.active:
+                stream.publish([e.to_dict() for e in events])
+        except Exception:  # noqa: BLE001 — infra must never kill the app
+            log.warning("infra loop tick failed", exc_info=True)
+        await asyncio.sleep(1.0)
+
+
 async def _collect_loop() -> None:
     consecutive_errors = 0
     while True:
@@ -541,10 +671,12 @@ async def lifespan(_: FastAPI):
     task = asyncio.create_task(_collect_loop())
     ttask = asyncio.create_task(_telemetry_loop())
     gtask = asyncio.create_task(_gpu_loop())
+    itask = asyncio.create_task(_infra_loop())
     yield
     task.cancel()
     ttask.cancel()
     gtask.cancel()
+    itask.cancel()
     try:
         await task
     except asyncio.CancelledError:
@@ -557,11 +689,15 @@ async def lifespan(_: FastAPI):
         await gtask
     except asyncio.CancelledError:
         pass
+    try:
+        await itask
+    except asyncio.CancelledError:
+        pass
     if telemetry_provider is not None:
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.3.1", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -702,6 +838,18 @@ async def api_semantic() -> dict:
         "summary": semantic_engine.summary(),
         "errors": _state.get("detector_errors", {}),
     }
+
+
+@app.get("/api/infra")
+async def api_infra() -> dict:
+    """Current infrastructure state (v0.4.0) — services/WSL/Docker/VMs.
+
+    READ-ONLY: observation data only, no control paths. Platforms that are
+    unavailable (engine down, no WSL, no hypervisor) report exactly that —
+    absent platforms are never invented, and no software is ever started to
+    produce a positive result.
+    """
+    return infra_engine.state_dict()
 
 
 @app.websocket("/ws")

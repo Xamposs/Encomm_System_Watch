@@ -144,6 +144,8 @@ class ActivityAggregator:
             self._wildcard_map = wildcard_map
             self._labels = labels
             self._edge_kinds = edge_kinds
+            self._counters["tuple_map_size"] = len(tuple_map)
+            self._counters["wildcard_map_size"] = len(wildcard_map)
             now = time.time()
             present = set(labels)
             for eid, st in self._edges.items():

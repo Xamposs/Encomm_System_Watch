@@ -114,6 +114,49 @@ export const STYLESHEET: StylesheetStyle[] = [
       'border-color': '#34d399', 'border-width': 1.8, color: '#a7f3d0', 'font-size': 8.5,
     },
   },
+  // ---- infrastructure nodes (v0.4.0) — compact control-room identities ----
+  {
+    selector: 'node[kind = "SERVICE"]',
+    style: {
+      shape: 'round-rectangle', width: 150, height: 44, 'background-color': '#2a2517',
+      'border-color': '#d9a03c', 'border-width': 1.4, color: '#f0d9a8', 'font-size': 8.5,
+    },
+  },
+  {
+    selector: 'node[kind = "WSL"]',
+    style: {
+      shape: 'hexagon', width: 110, height: 40, 'background-color': '#0f2730',
+      'border-color': '#22d3ee', 'border-width': 1.5, color: '#a5f3fc', 'font-size': 8.5,
+    },
+  },
+  {
+    selector: 'node[kind = "DOCKER_ENGINE"]',
+    style: {
+      shape: 'diamond', width: 130, height: 46, 'background-color': '#12203a',
+      'border-color': '#3b82f6', 'border-width': 1.8, color: '#bfdbfe', 'font-size': 8.5,
+    },
+  },
+  {
+    selector: 'node[kind = "CONTAINER"]',
+    style: {
+      shape: 'diamond', width: 118, height: 42, 'background-color': '#0f2a23',
+      'border-color': '#2dd4bf', 'border-width': 1.5, color: '#99f6e4', 'font-size': 8.5,
+    },
+  },
+  {
+    selector: 'node[kind = "DOCKER_NETWORK"]',
+    style: {
+      shape: 'ellipse', width: 90, height: 20, 'background-color': '#161b26',
+      'border-color': '#64748b', color: '#94a3b8', 'font-size': 8,
+    },
+  },
+  {
+    selector: 'node[kind = "VM"]',
+    style: {
+      shape: 'round-rectangle', width: 140, height: 46, 'background-color': '#2a1220',
+      'border-color': '#d946ef', 'border-width': 1.6, color: '#f5d0fe', 'font-size': 8.5,
+    },
+  },
   // family (process tree) nodes — same visual language, distinct border
   {
     selector: 'node[?family]',
@@ -179,6 +222,11 @@ export const STYLESHEET: StylesheetStyle[] = [
   { selector: 'edge[kind = "PROCESS_PARENT"]', style: { 'line-color': '#7c8aa5', 'target-arrow-color': '#7c8aa5', 'line-style': 'dotted' } },
   { selector: 'edge[kind = "SPAWNED"]', style: { 'line-color': '#a78bfa', 'target-arrow-color': '#a78bfa', 'line-style': 'dotted' } },
   { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#5f7fa8', 'target-arrow-color': '#5f7fa8', 'line-style': 'dotted', width: 0.8 } },
+  // ---- infrastructure edges (v0.4.0) --------------------------------------
+  { selector: 'edge[kind = "HOSTED_BY"]', style: { 'line-color': '#d9a03c', 'target-arrow-color': '#d9a03c', 'line-style': 'dashed', width: 1.2 } },
+  { selector: 'edge[kind = "EXPOSES"]', style: { 'line-color': '#2dd4bf', 'target-arrow-color': '#2dd4bf', 'line-style': 'dashed', width: 1.2 } },
+  { selector: 'edge[kind = "CONNECTED_TO"]', style: { 'line-color': '#64748b', 'target-arrow-color': '#64748b', 'line-style': 'dotted', width: 0.9 } },
+  { selector: 'edge[kind = "BACKED_BY"]', style: { 'line-color': '#d946ef', 'target-arrow-color': '#d946ef', 'line-style': 'dashed', width: 1.2 } },
   { selector: 'edge[?active]', style: { 'line-color': '#4a7fa0', 'target-arrow-color': '#4a7fa0' } },
   { selector: 'edge[?recent]', style: { 'line-color': '#5599b4', 'target-arrow-color': '#5599b4' } },
   // real observed traffic subtly brightens + thickens the edge; decays back
@@ -270,7 +318,7 @@ export class GraphController {
   private labelDirty = true
   private labelsVisible = true
   private compactMode = false
-  private aiView = false
+  private view: 'system' | 'ai' | 'infra' = 'system'
   private benchmarkMode = false
   private lodFar = false
   /** last label actually written per node (avoids redundant cytoscape
@@ -325,21 +373,20 @@ export class GraphController {
       t?.source && t.source !== 'NONE' ? t.source : 'SOCKET EVENTS (TIER 0)'
   }
 
-  // -------------------------------------------------------- semantic / AI view
+  // -------------------------------------------------------- SYSTEM / AI / INFRA views
 
   /**
-   * SYSTEM <-> AI view toggle. The AI view is driven by SEMANTIC
-   * CLASSIFICATION (node kind + backend `semantic`/`gpu_attributed` data),
-   * never by frontend string search: semantic resource nodes (SEMANTIC /
-   * LOCAL_LLM / GPU), processes the backend classified (data.semantic) and
-   * GPU-attributed processes stay; unrelated Windows noise dims. Graph
-   * state (positions, selection, focus) is preserved — nothing is rebuilt.
+   * SYSTEM <-> AI <-> INFRA view toggle. Every view is driven by backend
+   * CLASSIFICATION (node kind + `semantic`/`infra`/`gpu_attributed` data),
+   * never by frontend string search. The toggle only adds/removes a class:
+   * the Cytoscape instance, layout, positions, selection and focus are all
+   * preserved — nothing is rebuilt, no layout is forced.
    */
-  setSemanticView(ai: boolean): void {
-    if (ai === this.aiView) return
-    this.aiView = ai
+  setView(view: 'system' | 'ai' | 'infra'): void {
+    if (view === this.view) return
+    this.view = view
     const t0 = performance.now()
-    this.applySemanticView()
+    this.applyView()
     perf.recordAiToggle(performance.now() - t0)
   }
 
@@ -349,30 +396,85 @@ export class GraphController {
     return !!(el.data('semantic') || el.data('gpu_attributed'))
   }
 
-  private applySemanticView(): void {
+  private isInfraNode(el: NodeSingular): boolean {
+    const kind = el.data('kind')
+    return kind === 'SERVICE' || kind === 'WSL' || kind === 'DOCKER_ENGINE' ||
+      kind === 'CONTAINER' || kind === 'DOCKER_NETWORK' || kind === 'VM'
+  }
+
+  private applyView(): void {
     this.cy.batch(() => {
       this.cy.elements().removeClass('ai-dim')
-      if (!this.aiView) return
-      const keep = new Set<string>()
-      this.cy.nodes().forEach((n) => {
-        if (this.isSemanticNode(n)) keep.add(n.id())
-      })
-      // GPU-attributed processes (USES_GPU endpoints) also stay
-      this.cy.edges('[kind = "USES_GPU"]').forEach((e) => {
-        keep.add(e.source().id())
-        keep.add(e.target().id())
-      })
-      this.cy.nodes().forEach((n) => {
-        if (!keep.has(n.id())) n.addClass('ai-dim')
-      })
-      this.cy.edges().forEach((e) => {
-        const s = e.source().id()
-        const t = e.target().id()
-        // keep edges inside the semantic subset (including raw socket edges)
-        if (keep.has(s) && keep.has(t)) return
-        if (this.isSemanticNode(e.source()) || this.isSemanticNode(e.target())) return
-        e.addClass('ai-dim')
-      })
+      if (this.view === 'system') return
+      if (this.view === 'ai') {
+        this.applyAiView()
+        return
+      }
+      this.applyInfraView()
+    })
+  }
+
+  /** AI view: semantic resources + classified processes stay; noise dims. */
+  private applyAiView(): void {
+    const keep = new Set<string>()
+    this.cy.nodes().forEach((n) => {
+      if (this.isSemanticNode(n)) keep.add(n.id())
+    })
+    // GPU-attributed processes (USES_GPU endpoints) also stay
+    this.cy.edges('[kind = "USES_GPU"]').forEach((e) => {
+      keep.add(e.source().id())
+      keep.add(e.target().id())
+    })
+    this.cy.nodes().forEach((n) => {
+      if (!keep.has(n.id())) n.addClass('ai-dim')
+    })
+    this.cy.edges().forEach((e) => {
+      const s = e.source().id()
+      const t = e.target().id()
+      // keep edges inside the semantic subset (including raw socket edges)
+      if (keep.has(s) && keep.has(t)) return
+      if (this.isSemanticNode(e.source()) || this.isSemanticNode(e.target())) return
+      e.addClass('ai-dim')
+    })
+  }
+
+  /** INFRA view: services, WSL, Docker, VMs + their host processes stay;
+   * unrelated Windows noise dims. Classification-driven (data.infra roles,
+   * EXPOSES/USES_GPU edge evidence). */
+  private applyInfraView(): void {
+    const keep = new Set<string>()
+    this.cy.nodes().forEach((n) => {
+      if (this.isInfraNode(n)) keep.add(n.id())
+    })
+    // processes with a proven infra role (service hosts, VM backends)
+    this.cy.nodes('[?infra]').forEach((n) => {
+      keep.add(n.id())
+    })
+    // GPU nodes whose USES_GPU edge is proven by an infra host process
+    this.cy.edges('[kind = "USES_GPU"]').forEach((e) => {
+      const s = e.source()
+      const t = e.target()
+      if (this.isInfraNode(s) || this.isInfraNode(t)) {
+        keep.add(s.id())
+        keep.add(t.id())
+      }
+    })
+    // listening ports exposed by containers (EXPOSES evidence)
+    this.cy.edges('[kind = "EXPOSES"]').forEach((e) => {
+      keep.add(e.source().id())
+      keep.add(e.target().id())
+    })
+    // the Windows host node anchors the infrastructure
+    keep.add('sys:windows')
+    this.cy.nodes().forEach((n) => {
+      if (!keep.has(n.id())) n.addClass('ai-dim')
+    })
+    this.cy.edges().forEach((e) => {
+      const s = e.source().id()
+      const t = e.target().id()
+      if (keep.has(s) && keep.has(t)) return
+      if (this.isInfraNode(e.source()) || this.isInfraNode(e.target())) return
+      e.addClass('ai-dim')
     })
   }
 
@@ -601,7 +703,7 @@ export class GraphController {
     this.runLayout('initial')
     if (this.familyView === 'families') this.syncFamilyView()
     if (this.focusNode) this.applyFocus()
-    if (this.aiView) this.applySemanticView()
+    if (this.view !== 'system') this.applyView()
     perf.recordUpdate(performance.now() - t0)
   }
 
@@ -703,10 +805,39 @@ export class GraphController {
         if (m?.edge_id) this.fadeRemoveEdge(String(m.edge_id))
         break
       }
+      // ---- infrastructure events (v0.4.0, change-only) ------------------
+      // All carry metadata.node + metadata.edges (same shape as semantic
+      // events). SERVICE_*/CONTAINER_*/WSL_*/VM_* update the node in place;
+      // CONTAINER_REMOVED / VM_LOST remove it. A stopped service KEEPS its
+      // node (the service still exists — its status is just STOPPED).
+      case 'SERVICE_STARTED':
+      case 'SERVICE_STOPPED':
+      case 'SERVICE_STATUS_CHANGED':
+      case 'CONTAINER_STARTED':
+      case 'CONTAINER_STOPPED':
+      case 'CONTAINER_CREATED':
+      case 'WSL_STATE_CHANGED':
+      case 'VM_DETECTED':
+      case 'VM_STATE_CHANGED': {
+        const m = ev.metadata
+        const node = m?.node as TopoNode | undefined
+        if (node) this.upsertNode(node, false, undefined)
+        const edges = m?.edges as TopoEdge[] | undefined
+        if (Array.isArray(edges)) {
+          for (const e of edges) {
+            if (e?.id && e?.source && e?.target) this.upsertEdge(e)
+          }
+        }
+        break
+      }
+      case 'CONTAINER_REMOVED':
+      case 'VM_LOST':
+        this.fadeRemoveNode(String(ev.metadata?.node_id ?? ev.source))
+        break
     }
     if (this.familyView === 'families') this.syncFamilyView()
     if (this.focusNode) this.applyFocus()
-    if (this.aiView) this.applySemanticView()
+    if (this.view !== 'system') this.applyView()
   }
 
   private upsertNode(node: TopoNode, born: boolean, anchorId: string | undefined): void {

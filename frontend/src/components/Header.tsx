@@ -1,4 +1,4 @@
-import type { ConnectionStatus, Mode, SemanticSummary, Stats, TelemetryInfo } from '../types/system'
+import type { ConnectionStatus, InfraSummary, Mode, SemanticSummary, Stats, TelemetryInfo } from '../types/system'
 import { fmtBps } from '../graph/GraphController'
 
 interface Props {
@@ -60,6 +60,56 @@ export function AiSummary({ semantic }: { semantic?: SemanticSummary }) {
   )
 }
 
+/** Compact infrastructure chips — only categories actually detected. */
+export function InfraSummaryChips({ infra }: { infra?: InfraSummary }) {
+  if (!infra) return null
+  const chips: { text: string; cls: string; title: string }[] = []
+  if (infra.services.total > 0) {
+    chips.push({
+      text: `SERVICES ${infra.services.total}`,
+      cls: 'infra-services',
+      title: `${infra.services.running} RUNNING · ${infra.services.stopped} STOPPED`,
+    })
+  }
+  if (infra.wsl.distributions > 0) {
+    chips.push({
+      text: `WSL ${infra.wsl.distributions}`,
+      cls: 'infra-wsl',
+      title: `${infra.wsl.running} RUNNING · ${infra.wsl.distributions} distributions`,
+    })
+  }
+  if (infra.docker.containers > 0) {
+    chips.push({
+      text: `CONTAINERS ${infra.docker.containers}`,
+      cls: 'infra-docker',
+      title: `engine ${infra.docker.engine} · ${infra.docker.running} running`,
+    })
+  } else if (infra.docker.available && infra.docker.engine !== 'RUNNING') {
+    chips.push({
+      text: 'DOCKER STOPPED',
+      cls: 'infra-docker-off',
+      title: 'Docker engine not running — containers unavailable',
+    })
+  }
+  if (infra.vms.total > 0) {
+    chips.push({
+      text: `VM ${infra.vms.total}`,
+      cls: 'infra-vm',
+      title: `${infra.vms.running} RUNNING · ${infra.vms.providers.join(', ')}`,
+    })
+  }
+  if (chips.length === 0) return null
+  return (
+    <div className="infra-summary" title="Infrastructure summary — only real detections">
+      {chips.map((c, i) => (
+        <span key={i} className={`ai-chip ${c.cls}`} title={c.title}>
+          {c.text}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
   const feed = feedTs
     ? new Date(feedTs * 1000).toLocaleTimeString('en-GB', { hour12: false })
@@ -80,6 +130,7 @@ export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
       </div>
 
       <AiSummary semantic={stats?.semantic} />
+      <InfraSummaryChips infra={stats?.infra} />
 
       <div className="header-right">
         {mode === 'demo' && <div className="demo-badge">DEMO MODE</div>}

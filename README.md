@@ -6,11 +6,13 @@ as a living topology graph — a dark, dense, control-room-style map of what the
 machine is actually doing, in real time. Since v0.3.0 the map also understands
 **semantic identity**: Hermes, LM Studio, local LLMs, MCP servers and the GPU
 are detected with evidence-backed confidence, layered on top of the raw
-process truth.
+process truth. Since v0.4.0 it understands the **infrastructure layer**:
+Windows Services, WSL distributions, Docker Engine/containers and local
+virtual machines — all strictly read-only.
 
 > The graph is the product. This is **not** a traditional metrics dashboard.
 
-```
+```text
 Chrome ────────────▶ External 104.x.x.x:443
    │
    └──────────────▶ ◈ HERMES ── HOSTS ──▶ 127.0.0.1:port
@@ -22,6 +24,13 @@ Chrome ────────────▶ External 104.x.x.x:443
    │ USES_GPU
    ▼
 GPU 0 · NVIDIA GeForce GTX 1660 Ti · 74% · 5.2/6.0 GB
+
+WINDOWS 11 ── HOSTS ──▶ ⚙ Windows Update ── HOSTED_BY ──▶ svchost.exe PID 1234
+   │                     ⚙ BFE · mpssvc ── HOSTED_BY ──▶ svchost.exe PID 3624
+   ├── HOSTS ──▶ ⬡ Ubuntu (WSL2)
+   ├── HOSTS ──▶ ◆ DOCKER ENGINE ── HOSTS ──▶ ◇ postgres
+   │                └── EXPOSES ──▶ :5433
+   └── HOSTS ──▶ ▣ Win11-Lab (HYPER_V) ── BACKED_BY ──▶ vmwp.exe
 ```
 
 When real activity is detected (a connection opens, a process starts), the

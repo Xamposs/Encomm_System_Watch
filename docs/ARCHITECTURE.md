@@ -21,6 +21,14 @@ SEMANTIC DETECTOR REGISTRY          (GPU + AI observability, v0.3.0)
    ├── LmStudioDetector   — process identity + localhost API probe
    └── McpDetector        — cmdline/path/ancestry (stdio + HTTP/SSE)
    ▼
+INFRA COLLECTORS (v0.4.0, staggered 3-5s, READ-ONLY)
+   ├── ServicesCollector  — psutil win_service_iter, TTL metadata cache
+   ├── WslCollector       — wsl.exe --list/--status (never starts a distro)
+   ├── DockerCollector    — local engine CLI/npipe (never TCP 2375, no ENV)
+   └── VmCollector        — Hyper-V CIM / vmware-vmx / VBoxManage list
+   ▼
+INFRA ENGINE (v0.4.0)     (svc/wsl/docker/vm nodes + HOSTED_BY/HOSTS/EXPOSES/
+   ▼                      CONNECTED_TO/BACKED_BY edges + change-only events)
 SEMANTIC ENGINE           (evidence + confidence -> semantic resource nodes
    ▼                      -> relationships -> change-only events)
 DIFF / EVENT ENGINE
@@ -29,7 +37,7 @@ FASTAPI + WEBSOCKET  (127.0.0.1:8765)
    ▼
 FRONTEND STATE  (React hook + imperative graph controller)
    ▼
-CYTOSCAPE GRAPH  (SYSTEM / AI view · canvas pulse overlay on top)
+CYTOSCAPE GRAPH  (SYSTEM / AI / INFRA view · canvas pulse overlay on top)
 ```
 
 Network activity (v0.2) plugs into the same pipeline — the v0.2.2 runtime
@@ -527,3 +535,112 @@ events while edge attribution freezes. The detector watches
 
 Strictly READ-ONLY: it never stops logman, restarts ETW, restarts the
 backend or kills processes — the operator restarts manually.
+
+## 11. Infrastructure observability (v0.4.0)
+
+The infrastructure layer answers "what hosts what" on top of the raw process
+truth — strictly read-only, evidence-driven, change-only. Every platform
+degrades independently: Docker Desktop not running → Docker unavailable only;
+no WSL → WSL unavailable only; a missing hypervisor module → that provider
+unavailable only. SYSTEM WATCH keeps running.
+
+```
+WINDOWS HOST
+   │
+   ├── SERVICES                  ⚙ svc:<name>
+   │      └── HOSTED_BY ──▶ PROCESS   (real service PID evidence; N services
+   │                                  may share one svchost.exe — N edges to
+   │                                  the ONE process node, never one fake
+   │                                  process per service)
+   │
+   ├── WSL                       ⬡ wsl:<distro>
+   │      └── (HOSTS)            RUNNING/STOPPED · WSL1/2; bounded internal
+   │                              summary ONLY for already-running distros
+   │
+   ├── DOCKER ENGINE             ◆ docker:engine
+   │      ├── HOSTS ──▶ CONTAINER        ◇ container:<id12>
+   │      │                └── EXPOSES ──▶ LISTENING_PORT (proven host mapping
+   │      │                                 + existing topology listener only)
+   │      └── CONTAINER ── CONNECTED_TO ──▶ DOCKER_NETWORK (metadata-proven)
+   │
+   └── HYPERVISOR                ▣ vm:<provider>:<identity>
+          └── VM ── BACKED_BY ──▶ PROCESS   (real host process: vmwp.exe /
+                                       vmware-vmx.exe / VBox*)
+              └── USES_GPU ──▶ GPU         (ONLY when NVML PID attribution
+                                            proves the VM HOST process uses
+                                            that GPU)
+```
+
+### 11.1 Collectors (`backend/app/collectors/`)
+
+| Module | Source (all READ-ONLY) | Degrades to |
+|---|---|---|
+| `services.py` | `psutil.win_service_iter()` / service APIs; TTL-cached heavy metadata (30 s), status+PID every poll | per-service `inaccessible` entry (name preserved) — never a crash |
+| `wsl.py` | `wsl.exe --list --verbose` / `--list --running` / `--status` (UTF-16-resilient decode); bounded internal snapshot (`ps`/`free`/`uname`/`/proc/net/tcp`) for RUNNING distros only | WSL section unavailable; stopped distros never started/inspected |
+| `docker.py` | installed `docker` CLI over Docker Desktop's local npipe (never TCP 2375, never insecure API); `version`/`ps -a`/targeted `inspect --format '{{.State.Pid}}'` only | `engine_status: NOT_RUNNING` + empty containers |
+| `vm.py` | Hyper-V: `Get-VM` (CIM) + vmwp.exe GUID→PID mapping; VMware: vmware-vmx.exe + `.vmx` cmdline evidence, `vmrun list`; VirtualBox: `VBoxManage list runningvms` | per-provider `installed: false`; unproven processes → `VIRTUALIZATION PROCESS` (LOW/MEDIUM) |
+
+Subprocesses use `CREATE_NO_WINDOW`; PowerShell runs with `-NoProfile
+-NonInteractive`; every command has a hard timeout; every collector is
+wrapped so a failure degrades only its own section.
+
+### 11.2 InfraEngine (`backend/app/services/infra.py`)
+
+Additive layer (same pattern as the semantic engine): own node ids
+(`svc:*`, `wsl:*`, `docker:engine`, `container:*`, `dockernet:*`, `vm:*`),
+own edge ids (`infra:*`), merged into every WS snapshot; process nodes get
+`data.infra` roles (`service_host` / `vm_backend`) so the INFRA view is
+classification-driven. Events are change-only (`SERVICE_STARTED/STOPPED/
+STATUS_CHANGED`, `CONTAINER_CREATED/STARTED/STOPPED/REMOVED`,
+`WSL_STATE_CHANGED`, `VM_DETECTED/LOST/STATE_CHANGED`) — the first sample
+establishes the baseline, so startup never storms the drawer. A stopped
+service KEEPS its node (status flips); a removed container / lost VM removes
+it.
+
+Polling lives in one staggered `_infra_loop` (services 4 s, WSL 5 s, Docker
+3 s, VM 4 s, `ESW_INFRA_*_INTERVAL_S`) so the main 1 s collect loop and its
+Phase-20 performance behavior are untouched. Benchmark mode suppresses infra
+forwarding like every other real-data channel.
+
+### 11.3 Evidence boundaries (never crossed)
+
+- **Windows host process ≠ guest process.** Service PID mapping targets
+  psutil process nodes on the host; VM `BACKED_BY` edges point at the real
+  host worker (vmwp.exe / vmware-vmx.exe / VBox*). Linux processes inside
+  WSL are never presented as native Windows process nodes — only a bounded
+  summary on the WSL node.
+- **Container port mapping ≠ arbitrary socket attribution.** `EXPOSES`
+  edges exist only when Docker proves a host port mapping AND the topology
+  actually has that `LISTENING_PORT` node; `0.0.0.0`/`::` mappings match any
+  listener on that port (the mapping is still proven; only the interface may
+  be ambiguous). No listener → no edge, no invented port node.
+- **WSL host process ≠ Linux process.** Deep inspection runs only for
+  distros already confirmed running, and stays a bounded read-only summary —
+  no thousands of guest processes.
+- **GPU host PID attribution ≠ guest GPU utilization.** `USES_GPU` from a
+  VM is emitted only when NVML's per-PID attribution proves the VM HOST
+  process is on the GPU. A busy GPU alone is never attributed to a guest.
+- **Identity is evidence-backed.** An unproven hypervisor process becomes
+  `VIRTUALIZATION PROCESS` — never a made-up VM name. VMware names come
+  from the `.vmx` file (path sanitized to the file name); VirtualBox names
+  from `list runningvms`; Hyper-V names/IDs from `Get-VM`.
+- **No control surface.** No service start/stop, no docker
+  start/stop/exec, no `wsl --shutdown/--terminate`, no
+  `VBoxManage controlvm/startvm`, no `vmrun start/stop`, no
+  Start/Stop/Restart-VM. `tests/test_infra_security.py` scans the new
+  modules (executable code only — docstrings legitimately name the rules)
+  for forbidden control tokens and for container-ENV serialization.
+- **No environment leakage.** Container ENV is never collected, parsed or
+  serialized; labels are not collected; service binpaths are redacted.
+
+### 11.4 Frontend INFRA view
+
+Third top-level view (SYSTEM / AI / INFRA) — a pure class toggle on the same
+Cytoscape instance: positions, selection, focus and layout are preserved;
+no graph recreation, no forced layout. Classification-driven: infra node
+kinds, `data.infra`-tagged processes, GPU nodes with infra-proven
+`USES_GPU` edges, `EXPOSES`-linked listening ports, and the Windows host
+node stay; unrelated noise dims. Header chips (`SERVICES n`, `WSL n`,
+`CONTAINERS n`, `VM n`, `DOCKER STOPPED`) render only detected categories;
+the inspector gains read-only WINDOWS SERVICE / WSL DISTRIBUTION / DOCKER
+ENGINE / CONTAINER / DOCKER NETWORK / VIRTUAL MACHINE sections.

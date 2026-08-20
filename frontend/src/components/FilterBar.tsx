@@ -62,7 +62,7 @@ export function FilterBar({
         </button>
       </div>
 
-      <div className="view-toggle" title="SYSTEM = full machine map · AI = semantic AI subset (Hermes, LM Studio, models, MCP, GPU)">
+      <div className="view-toggle" title="SYSTEM = full machine map · AI = semantic AI subset (Hermes, LM Studio, models, MCP, GPU) · INFRA = services, WSL, Docker, VMs">
         <button
           className={`pill sem-view ${semanticView === 'system' ? 'active' : ''}`}
           onClick={() => onSemanticView('system')}
@@ -74,6 +74,12 @@ export function FilterBar({
           onClick={() => onSemanticView('ai')}
         >
           AI
+        </button>
+        <button
+          className={`pill sem-view ${semanticView === 'infra' ? 'active' : ''}`}
+          onClick={() => onSemanticView('infra')}
+        >
+          INFRA
         </button>
       </div>
 

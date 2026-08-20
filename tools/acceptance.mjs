@@ -1161,6 +1161,161 @@ async function main() {
   })()`)
   check('AA38 testInjectActivity gated to benchmark', /TEST-ONLY/.test(gateThrow), gateThrow)
 
+  // ---- Test AB: INFRASTRUCTURE (services / WSL / Docker / VMs) ------------
+  // Real-machine observability with truthful SKIPPED behavior: fixtures are
+  // never presented as real evidence; unavailable platforms report exactly
+  // that and no software is ever started to force a positive result.
+  console.log('\n[Test AB] Infrastructure observability (v0.4.0)')
+  const infra = await (await fetch(`${API}/api/infra`)).json()
+  const svcBlock = infra?.services ?? {}
+  check('AB0 /api/infra serializes state', !!infra && !!svcBlock && Array.isArray(infra?.wsl?.distributions), 'schema present')
+  // fresh page: AB graph assertions must run against a clean snapshot, not
+  // residue from the AA benchmark fixture cycles (the benchmark pages carry
+  // no infra edges)
+  await cdp.send('Page.reload')
+  await sleep(9000)
+  const abLive = await cdp.eval(EX.connLabel)
+  check('AB0b reconnected LIVE after fresh reload', abLive === '● LIVE', abLive)
+
+  // ---- services (REAL on this machine) -----------------------------------
+  check('AB1 real services enumerated', (svcBlock.count ?? 0) >= 100, `count=${svcBlock.count}`)
+  check('AB2 running + stopped == total', (svcBlock.running ?? 0) + (svcBlock.stopped ?? 0) === (svcBlock.count ?? -1),
+    `running=${svcBlock.running} stopped=${svcBlock.stopped} total=${svcBlock.count}`)
+  check('AB3 PID mappings exist', (svcBlock.pid_mappings ?? 0) >= 10, `mappings=${svcBlock.pid_mappings}`)
+  const shared = svcBlock.shared_hosts ?? []
+  check('AB4 shared host proven (svchost truthfulness)', shared.length >= 1,
+    shared.length ? `pid ${shared[0].pid}: ${shared[0].services.join(', ')}` : 'none')
+  const svcNodes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="SERVICE"]').length : -1`)
+  check('AB5 SERVICE nodes in graph', svcNodes >= 100, `nodes=${svcNodes}`)
+  const hostedEdges = await cdp.eval(`window.__esw_cy ? window.__esw_cy.edges('[kind="HOSTED_BY"]').length : -1`)
+  check('AB6 HOSTED_BY edges (service -> process)', hostedEdges >= 10, `edges=${hostedEdges}`)
+
+  // ---- WSL (REAL: Ubuntu + docker-desktop, both stopped on this machine) --
+  const wslBlock = infra?.wsl ?? {}
+  if (wslBlock.installed === true) {
+    const distros = wslBlock.distributions ?? []
+    check('AB7 WSL distributions discovered', distros.length >= 1, distros.map((d) => d.name).join(','))
+    const wslNodes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="WSL"]').length : 0`)
+    check('AB8 WSL nodes in graph', wslNodes >= 1, `nodes=${wslNodes}`)
+    const wslHosts = await cdp.eval(`(() => { const cy = window.__esw_cy; if (!cy) return 0; let n = 0; cy.edges('[kind="HOSTS"]').forEach(e => { if (e.target().data('kind') === 'WSL') n++ }); return n })()`)
+    check('AB9 WSL HOSTS edges (host -> distro)', wslHosts >= 1, `edges=${wslHosts}`)
+    const runningDistros = distros.filter((d) => d.state === 'Running')
+    if (runningDistros.length === 0) {
+      // stopped distros must NEVER be inspected internally
+      const stoppedUninspected = await cdp.eval(`(() => { const cy = window.__esw_cy; if (!cy) return -1; let n = 0; cy.nodes('[kind="WSL"]').forEach(x => { if (x.data('state') === 'Stopped' && !x.data('summary')) n++ }); return n })()`)
+      check('AB10 stopped distros never inspected', stoppedUninspected >= distros.length,
+        `stopped-uninspected=${stoppedUninspected}`)
+      console.log('  info  WSL INTERNAL SUMMARY: SKIPPED — no running distro (never auto-started)')
+    } else {
+      const summarized = await cdp.eval(`(() => { const cy = window.__esw_cy; if (!cy) return -1; let n = 0; cy.nodes('[kind="WSL"]').forEach(x => { if (x.data('summary')) n++ }); return n })()`)
+      check('AB10 running distro bounded summary', summarized >= runningDistros.length, `summaries=${summarized}`)
+    }
+  } else {
+    console.log('  SKIP  AB7–AB10 (WSL not installed)')
+  }
+
+  // ---- Docker (client installed; engine NOT running on this machine) -----
+  const dockerBlock = infra?.docker ?? {}
+  const dockerNodes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="CONTAINER"]').length : 0`)
+  if (dockerBlock.engine_status === 'RUNNING') {
+    check('AB11 docker engine running', true, `v${dockerBlock.version ?? '?'}`)
+    const containers = (dockerBlock.containers ?? []).length
+    check('AB12 containers enumerated', containers >= 1, `containers=${containers}`)
+    check('AB13 CONTAINER nodes in graph', dockerNodes >= 1, `nodes=${dockerNodes}`)
+    const exposes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.edges('[kind="EXPOSES"]').length : 0`)
+    check('AB14 EXPOSES edges from proven host mappings', exposes >= 1, `edges=${exposes}`)
+    const blob = JSON.stringify(dockerBlock.containers).toLowerCase()
+    check('AB15 no container ENV/credentials in API', !blob.includes('password') && !blob.includes('api_key') && !blob.includes('"env"'),
+      'env absent from serialization')
+  } else {
+    check('AB11 engine down reported truthfully', dockerBlock.engine_status === 'NOT_RUNNING', dockerBlock.engine_status)
+    check('AB12 zero CONTAINER nodes when engine down', dockerNodes === 0, `nodes=${dockerNodes}`)
+    console.log('  info  REAL DOCKER: SKIPPED — ENGINE NOT RUNNING (never auto-started)')
+  }
+
+  // ---- VMs (Hyper-V/VMware/VirtualBox installed; none running) ------------
+  const vmBlock = infra?.vms ?? {}
+  const provNames = Object.keys(vmBlock.providers ?? {})
+  check('AB16 hypervisor providers detected', provNames.length >= 1, provNames.join(','))
+  const vmTotal = (vmBlock.vms ?? []).length
+  const vmNodes = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[kind="VM"]').length : 0`)
+  if (vmTotal > 0) {
+    check('AB17 VM nodes in graph', vmNodes >= 1, `nodes=${vmNodes}`)
+    const backed = await cdp.eval(`window.__esw_cy ? window.__esw_cy.edges('[kind="BACKED_BY"]').length : 0`)
+    check('AB18 BACKED_BY host-process edges', backed >= 1, `edges=${backed}`)
+    const running = (vmBlock.vms ?? []).filter((v) => v.state === 'RUNNING')
+    check('AB19 VM states truthful', running.length >= 1, `running=${running.length}`)
+  } else {
+    check('AB17 zero VM nodes when none running', vmNodes === 0, `nodes=${vmNodes}`)
+    console.log('  info  REAL VM VALIDATION: SKIPPED — NO RUNNING VM (never auto-started)')
+  }
+
+  // ---- header chips + event discipline -----------------------------------
+  const hdrInfra = await cdp.eval(EX.headerText)
+  check('AB20 SERVICES chip in header', /SERVICES \d+/.test(hdrInfra),
+    hdrInfra.split('\n').filter((l) => l.includes('SERVICES'))[0] || '')
+  const svcEventCount = await cdp.eval(`[...document.querySelectorAll('.ev-type')].filter(e => e.textContent.includes('SERVICE')).length`)
+  // change-only: the fresh reload above resets the drawer, so this window
+  // only spans AB's own runtime. A handful of REAL service transitions on a
+  // live machine is legitimate; a storm (the 120-event baseline bug class)
+  // is what this guards against.
+  check('AB21 no service event spam (change-only)', svcEventCount < 10, `service-events=${svcEventCount}`)
+
+  // ---- INFRA view: classification-driven, same cytoscape instance --------
+  const infraPill = await cdp.eval(`(() => {
+    const b = [...document.querySelectorAll('.pill')].find(x => x.textContent.trim() === 'INFRA')
+    if (b) { b.click(); return true }
+    return false
+  })()`)
+  check('AB22 INFRA pill present and clickable', infraPill === true)
+  await sleep(900)
+  const infraDim = await cdp.eval(`window.__esw_cy ? window.__esw_cy.elements('.ai-dim').length : -1`)
+  const svcVisible = await cdp.eval(`(() => { const n = window.__esw_cy?.nodes('[kind="SERVICE"]')[0]; return n ? !n.hasClass('ai-dim') && n.visible() : false })()`)
+  check('AB23 INFRA view dims unrelated noise', infraDim > 0, `dimmed=${infraDim}`)
+  check('AB24 SERVICE nodes visible in INFRA view', svcVisible === true, 'service not dimmed')
+  await cdp.shot('ab-infra-view.png')
+  // SYSTEM -> INFRA -> AI -> SYSTEM cycle preserves the graph instance
+  const cyBefore = await cdp.eval(`(() => { window.__esw_cyMarker = window.__esw_cy; return !!window.__esw_cy })()`)
+  await cdp.eval(`[...document.querySelectorAll('.pill')].find(b => b.textContent.trim() === 'AI')?.click() ?? false`)
+  await sleep(600)
+  await cdp.eval(`[...document.querySelectorAll('.pill')].find(b => b.textContent.trim() === 'SYSTEM')?.click() ?? false`)
+  await sleep(600)
+  const dimAfter = await cdp.eval(`window.__esw_cy ? window.__esw_cy.elements('.ai-dim').length : -1`)
+  const sameInstance = await cdp.eval(`window.__esw_cy === window.__esw_cyMarker`)
+  check('AB25 SYSTEM->INFRA->AI->SYSTEM cycle', cyBefore === true && sameInstance === true, 'same cytoscape instance')
+  check('AB26 SYSTEM restores full graph', dimAfter === 0, `dimmed=${dimAfter}`)
+
+  // ---- service inspector (read-only) -------------------------------------
+  // deterministic cytoscape tap (no coordinate/overlap flakiness — same
+  // precedent as the tooltip emit fallback in Test Q). The node must be
+  // NATIVELY selected too: the App renders the inspector only when the
+  // selection count is exactly 1 (a real mouse click selects; emit alone
+  // does not).
+  const svcTapped = await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    const n = cy?.nodes('[kind="SERVICE"]')[0]
+    if (!n) return false
+    n.select()
+    n.emit('tap')
+    return true
+  })()`)
+  // poll for the inspector (React render + selection propagation can take a
+  // beat after the tap)
+  let svcInspText = ''
+  for (let i = 0; i < 6; i++) {
+    svcInspText = await cdp.eval(EX.inspectorText)
+    if (svcInspText.includes('WINDOWS SERVICE')) break
+    await sleep(500)
+  }
+  check('AB27 service inspector section', svcTapped === true && svcInspText.includes('WINDOWS SERVICE'),
+    svcTapped ? 'tap dispatched' : 'no service node')
+  check('AB28 inspector read-only for infra', !/kill|terminate|restart/i.test(svcInspText), 'no control buttons')
+  await cdp.eval(EX.closeInspector)
+
+  // ---- no benchmark leftovers --------------------------------------------
+  const testOnlyAB = await cdp.eval(EX.testOnlyNodes)
+  check('AB29 zero synthetic nodes (no benchmark leftovers)', testOnlyAB === 0, `testOnly=${testOnlyAB}`)
+
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact
   await cdp.send('Emulation.setDeviceMetricsOverride', {

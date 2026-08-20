@@ -126,6 +126,156 @@ function GpuSection({ node }: { node: Record<string, unknown> }) {
   )
 }
 
+/** Infrastructure detail blocks (v0.4.0) — read-only, per infra kind. */
+function InfraSection({ node }: { node: Record<string, unknown> }) {
+  const kind = String(node.kind ?? '')
+  if (kind === 'SERVICE') {
+    return (
+      <div className="inspector-net">
+        <div className="inspector-net-title">WINDOWS SERVICE</div>
+        <div className="inspector-net-row">Status: {String(node.status ?? '—').toUpperCase()}</div>
+        {typeof node.start_type === 'string' && node.start_type && (
+          <div className="inspector-net-row">Start type: {node.start_type}</div>
+        )}
+        {typeof node.account === 'string' && node.account && (
+          <div className="inspector-net-row">Account: {node.account}</div>
+        )}
+        {typeof node.pid === 'number' && (
+          <div className="inspector-net-row">PID: {node.pid} (host process)</div>
+        )}
+        {typeof node.binpath === 'string' && node.binpath && (
+          <div className="inspector-net-row">Binary: {node.binpath}</div>
+        )}
+        {typeof node.description === 'string' && node.description && (
+          <div className="inspector-net-row sem-evidence">{node.description}</div>
+        )}
+      </div>
+    )
+  }
+  if (kind === 'WSL') {
+    const summary = node.summary as Record<string, unknown> | undefined
+    return (
+      <div className="inspector-net">
+        <div className="inspector-net-title">WSL DISTRIBUTION</div>
+        <div className="inspector-net-row">State: {String(node.state ?? '—')}</div>
+        {typeof node.version === 'number' && (
+          <div className="inspector-net-row">WSL version: {node.version}</div>
+        )}
+        {node.is_default === true && <div className="inspector-net-row">Default distribution</div>}
+        {summary ? (
+          <>
+            <div className="inspector-net-row">INTERNAL SUMMARY (running distro)</div>
+            {typeof summary.process_count === 'number' && (
+              <div className="inspector-net-row">Processes: {summary.process_count}</div>
+            )}
+            {typeof summary.kernel === 'string' && (
+              <div className="inspector-net-row">Kernel: {summary.kernel}</div>
+            )}
+            {Array.isArray(summary.top_processes) && (
+              <div className="inspector-net-row">
+                Top: {(summary.top_processes as string[]).slice(0, 6).join(', ')}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="inspector-net-row dim">
+            Internal summary: not inspected (distribution not running)
+          </div>
+        )}
+      </div>
+    )
+  }
+  if (kind === 'DOCKER_ENGINE') {
+    return (
+      <div className="inspector-net">
+        <div className="inspector-net-title">DOCKER ENGINE</div>
+        <div className="inspector-net-row">Engine: {String(node.engine_status ?? '—')}</div>
+        {typeof node.version === 'string' && (
+          <div className="inspector-net-row">Version: {node.version}</div>
+        )}
+        <div className="inspector-net-row">Source: {String(node.source ?? '—')}</div>
+        {typeof node.containers === 'number' && (
+          <div className="inspector-net-row">Containers: {node.containers}</div>
+        )}
+      </div>
+    )
+  }
+  if (kind === 'CONTAINER') {
+    const ports = node.ports as
+      | { host_ip?: string | null; host_port?: number | null; container_port: number; proto: string }[]
+      | undefined
+    const nets = node.networks as string[] | undefined
+    return (
+      <div className="inspector-net">
+        <div className="inspector-net-title">CONTAINER</div>
+        <div className="inspector-net-row">Image: {String(node.image ?? '—')}</div>
+        <div className="inspector-net-row">State: {String(node.state ?? '—')}</div>
+        {typeof node.status === 'string' && node.status && (
+          <div className="inspector-net-row">Status: {node.status}</div>
+        )}
+        {typeof node.pid === 'number' && (
+          <div className="inspector-net-row">Host PID: {node.pid}</div>
+        )}
+        {Array.isArray(ports) && ports.length > 0 && (
+          <div className="inspector-net-row">
+            PORTS
+            {ports.map((p, i) => (
+              <div key={i} className="sem-evidence">
+                {p.host_port != null
+                  ? `${p.host_ip ?? '0.0.0.0'}:${p.host_port} → ${p.container_port}/${p.proto}`
+                  : `${p.container_port}/${p.proto} (no host mapping)`}
+              </div>
+            ))}
+          </div>
+        )}
+        {Array.isArray(nets) && nets.length > 0 && (
+          <div className="inspector-net-row">Networks: {nets.join(', ')}</div>
+        )}
+        {typeof node.created === 'number' && (
+          <div className="inspector-net-row">
+            Created: {new Date(node.created * 1000).toLocaleString()}
+          </div>
+        )}
+      </div>
+    )
+  }
+  if (kind === 'DOCKER_NETWORK') {
+    return (
+      <div className="inspector-net">
+        <div className="inspector-net-title">DOCKER NETWORK</div>
+        <div className="inspector-net-row">Name: {String(node.name ?? '—')}</div>
+      </div>
+    )
+  }
+  if (kind === 'VM') {
+    const meta = node.metadata as Record<string, unknown> | undefined
+    return (
+      <div className="inspector-net">
+        <div className="inspector-net-title">VIRTUAL MACHINE</div>
+        <div className="inspector-net-row">Provider: {String(node.provider ?? '—')}</div>
+        <div className="inspector-net-row">State: {String(node.state ?? '—')}</div>
+        <div className="inspector-net-row">Confidence: {String(node.confidence ?? '—')}</div>
+        <div className="inspector-net-row dim">Evidence: {String(node.evidence ?? '—')}</div>
+        {typeof node.host_pid === 'number' && (
+          <div className="inspector-net-row">Host process PID: {node.host_pid}</div>
+        )}
+        {meta && typeof meta.generation === 'number' && (
+          <div className="inspector-net-row">Generation: {meta.generation}</div>
+        )}
+        {meta && typeof meta.memory_mb === 'number' && (
+          <div className="inspector-net-row">
+            Assigned memory: {(Number(meta.memory_mb) / 1024).toFixed(1)} GB
+          </div>
+        )}
+        {meta && typeof meta.uptime_s === 'number' && (
+          <div className="inspector-net-row">Uptime: {Math.round(Number(meta.uptime_s) / 3600)} h</div>
+        )}
+      </div>
+    )
+  }
+  return null
+}
+
 /** Read-only node inspector. Observation only — no control buttons, by design. */
 export function Inspector({ node, onClose }: Props) {
   const kind = String(node.kind ?? 'PROCESS')
@@ -200,6 +350,39 @@ export function Inspector({ node, onClose }: Props) {
       ['Power', typeof node.power_w === 'number' ? `${node.power_w} W` : '—'],
       ['Driver', String(node.driver ?? '—')],
     )
+  } else if (kind === 'SERVICE') {
+    rows.push(
+      ['Type', 'WINDOWS SERVICE'],
+      ['Name', String(node.name ?? '')],
+      ['Display name', String(node.display_name ?? '')],
+    )
+  } else if (kind === 'WSL') {
+    rows.push(
+      ['Type', 'WSL DISTRIBUTION'],
+      ['Distribution', String(node.name ?? '')],
+    )
+  } else if (kind === 'DOCKER_ENGINE') {
+    rows.push(
+      ['Type', 'DOCKER ENGINE'],
+      ['Engine', String(node.engine_status ?? '')],
+    )
+  } else if (kind === 'CONTAINER') {
+    rows.push(
+      ['Type', 'CONTAINER'],
+      ['Name', String(node.name ?? '')],
+      ['Container ID', String(node.id ?? '')],
+    )
+  } else if (kind === 'DOCKER_NETWORK') {
+    rows.push(
+      ['Type', 'DOCKER NETWORK'],
+      ['Name', String(node.name ?? '')],
+    )
+  } else if (kind === 'VM') {
+    rows.push(
+      ['Type', 'VIRTUAL MACHINE'],
+      ['Name', String(node.name ?? 'VIRTUALIZATION PROCESS')],
+      ['VM ID', String(node.vm_id ?? '—')],
+    )
   }
 
   const hasNet =
@@ -221,6 +404,11 @@ export function Inspector({ node, onClose }: Props) {
       <SemanticSection node={node} />
       {/* GPU section — only for GPU nodes */}
       {kind === 'GPU' && <GpuSection node={node} />}
+      {/* INFRA section (v0.4.0) — services / WSL / Docker / VMs */}
+      {(kind === 'SERVICE' || kind === 'WSL' || kind === 'DOCKER_ENGINE' ||
+        kind === 'CONTAINER' || kind === 'DOCKER_NETWORK' || kind === 'VM') && (
+        <InfraSection node={node} />
+      )}
       {/* NETWORK section — only rendered when actual telemetry exists */}
       {hasNet && kind === 'PROCESS' && (
         <div className="inspector-net">

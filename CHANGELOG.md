@@ -2,6 +2,173 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.4.0] — 2026-08-20
+
+Infrastructure observability checkpoint (Phases 08 + 09 COMPLETE, Phase 21
+COMPLETE). SYSTEM WATCH now understands the machine's infrastructure layer:
+Windows Services, WSL distributions, Docker Engine/containers and local
+virtual machines — all strictly read-only, evidence-driven, change-only.
+
+### Added — Windows Services (Phase 08, `backend/app/collectors/services.py`)
+
+- Full service enumeration via psutil (`win_service_iter` — no control APIs
+  are ever called): name, display name, status, start type (compact
+  Auto/AutoDelay/Manual/Disabled), account, binary path (redacted),
+  description, PID. Unavailable fields are omitted, never fabricated.
+- Heavy metadata is TTL-cached (30 s); status + PID refresh every poll
+  (default 4 s, `ESW_INFRA_SERVICES_INTERVAL_S`).
+- Per-service failure isolation: a service whose state cannot be read is
+  marked `inaccessible` with its name preserved — never a crash, never
+  invented data.
+- **Shared-host truthfulness**: N services in one svchost.exe produce N
+  `HOSTED_BY` edges to the ONE real process node — never one fake process
+  per service (verified live: BFE + Windows Defender Firewall share
+  pid 3624; 119 running PID mappings on this machine).
+- Compact `SERVICE` nodes (`⚙ <display name> / RUNNING · Auto · PID n`) and
+  change-only events: `SERVICE_STARTED` / `SERVICE_STOPPED` /
+  `SERVICE_STATUS_CHANGED` (first sample is the baseline — no startup storm).
+
+### Added — WSL (Phase 09, `backend/app/collectors/wsl.py`)
+
+- Read-only discovery only: `wsl --list --verbose` / `--list --running` /
+  `--status` (UTF-16 resilient decoding). Distribution name, state,
+  version, default marker.
+- **A STOPPED distribution is never started and never inspected
+  internally.** Bounded internal summaries (process count, kernel, top
+  process names, memory, listening TCP ports) run ONLY for distributions
+  already confirmed RUNNING, via one minimal read-only command with a hard
+  timeout; any failure degrades to `summary: null`.
+- `WSL` nodes (`⬡ Ubuntu / STOPPED / WSL2`) + `HOSTS` edges from the
+  Windows host; `WSL_STATE_CHANGED` events on real flips only.
+
+### Added — Docker Engine + containers (Phase 09, `backend/app/collectors/docker.py`)
+
+- Engine detection through the installed `docker` CLI (Docker Desktop's
+  local npipe — never TCP 2375, never insecure API access). Engine down →
+  truthful `NOT_RUNNING` with empty containers — the app keeps running.
+- Read-only `docker ps -a` JSON stream: short id, name, image, state,
+  status, created, host port mappings (parsed, including no-host-mapping
+  forms), networks. Host PIDs via **targeted** `docker inspect --format
+  '{{.State.Pid}}'` only (bounded).
+- **No environment leakage**: container ENV is never collected, parsed or
+  serialized (full inspect JSON is never requested); labels are not
+  collected. Verified by unit tests.
+- `DOCKER_ENGINE` / `CONTAINER` / `DOCKER_NETWORK` nodes; `HOSTS` (engine →
+  container), `EXPOSES` (container → real topology LISTENING_PORT node,
+  only when the host mapping is proven AND the listener exists — nothing
+  invented), `CONNECTED_TO` (container → network, proven by metadata).
+- Change-only events: `CONTAINER_CREATED` / `CONTAINER_STARTED` /
+  `CONTAINER_STOPPED` / `CONTAINER_REMOVED`.
+
+### Added — Virtual machine observability (Phase 21, `backend/app/collectors/vm.py`)
+
+- Generic VM detector framework: Hyper-V (read-only CIM `Get-VM` + vmwp.exe
+  GUID→PID host-process mapping), VMware (`vmware-vmx.exe` + .vmx evidence,
+  read-only `vmrun list` when installed), VirtualBox (`VBoxManage list
+  runningvms` only), plus generic hypervisor-process detection
+  (vmwp/vmx/VBoxHeadless/VirtualBox/qemu).
+- **Identity is evidence-backed**: VM name only when provable; an
+  unproven hypervisor process becomes `VIRTUALIZATION PROCESS` (LOW/MEDIUM
+  confidence) — never a made-up name. VM paths are sanitized (file name
+  only). Provider/name/state/confidence/evidence schema per spec.
+- `VM` nodes + `HOSTS` (host → VM), `BACKED_BY` (VM → real host process),
+  and `USES_GPU` **only when NVML PID attribution proves the VM host
+  process uses that GPU** — guest GPU use is never inferred.
+- Change-only events: `VM_DETECTED` / `VM_LOST` / `VM_STATE_CHANGED`.
+
+### Added — InfraEngine + INFRA view
+
+- `backend/app/services/infra.py`: additive semantic layer (own ids
+  `svc:*`/`wsl:*`/`docker:*`/`container:*`/`dockernet:*`/`vm:*`, edges
+  `infra:*`) merged into every snapshot; process nodes get `data.infra`
+  roles (service_host / vm_backend) so the INFRA view is
+  classification-driven. Change-only events; first sample = baseline.
+- Staggered `_infra_loop` (services 4 s, WSL 5 s, Docker 3 s, VM 4 s) —
+  the main 1 s collect loop is untouched; every collector degrades
+  independently; benchmark mode suppresses forwarding so synthetic and
+  real data never mix.
+- `GET /api/infra` — full read-only infra state (counts, shared hosts,
+  distributions, engine, VMs, summary). Stats carry a compact `infra`
+  block for header chips.
+- **Frontend**: third top-level view **SYSTEM / AI / INFRA** (same
+  Cytoscape instance, positions/selection preserved, no layout forced —
+  only a class toggle). Infra node/edge styles (⚙ amber, ⬡ cyan, ◆ blue/
+  teal, ▣ magenta; HOSTED_BY/EXPOSES/CONNECTED_TO/BACKED_BY), inspector
+  sections per kind, header chips (`SERVICES n`, `WSL n`, `CONTAINERS n`,
+  `VM n` — only detected categories; `DOCKER STOPPED` when the engine is
+  down), event-drawer rows, legend entries.
+
+### Security
+
+- Strictly read-only: no service start/stop/restart, no docker
+  start/stop/exec, no `wsl --shutdown/--terminate`, no VM control commands
+  (`VBoxManage controlvm/startvm`, `vmrun start/stop`, Start/Stop-VM). A
+  new security test suite (`tests/test_infra_security.py`) scans the new
+  modules for forbidden control tokens and ENV serialization so a
+  regression can never silently reintroduce a control surface.
+- VM paths sanitized; service binpaths redacted; container ENV/labels never
+  serialized; no software is ever started to force a positive result.
+
+### Tests
+
+- Backend: 171 → **221 passed / 0 failed** (new: services collector —
+  enumeration/PID mapping/shared host/inaccessible/state change; WSL —
+  no-WSL/UTF-16 distro list/stopped-never-inspected/running bounded
+  summary/parser resilience; Docker — no engine/engine available/ports/
+  no-ENV-leakage; VM — no hypervisor/Hyper-V/VMware/VirtualBox fixtures/
+  ambiguous process/no-control-commands; InfraEngine — classifications/
+  no duplicates/no orphan edges/change-only events/EXPOSES matching/GPU
+  boundary; security scans).
+- Frontend: `npm run typecheck` + `npm run build` PASS.
+- Acceptance: new **Test AB — INFRASTRUCTURE** section (REAL services
+  count/status/PID mappings/shared host; REAL WSL discovery with
+  stopped-never-inspected; truthful Docker SKIPPED when engine down;
+  truthful VM SKIPPED with providers detected; INFRA view dimming +
+  SYSTEM→INFRA→AI→SYSTEM same-instance cycle; service inspector; header
+  chips; no benchmark leftovers).
+
+### Real-machine validation (this machine)
+
+- **Services**: REAL — 293 enumerated (119 running / 174 stopped), 119 PID
+  mappings, shared-host proven (BFE + mpssvc → pid 3624).
+- **WSL**: REAL — Ubuntu (default, WSL2) + docker-desktop, both STOPPED;
+  internal summary correctly SKIPPED (never auto-started).
+- **Docker**: client installed, engine NOT running → truthful
+  `REAL DOCKER: SKIPPED — ENGINE NOT RUNNING`; unit-tested with fixtures.
+- **VMs**: Hyper-V (enabled, vmms running) + VMware Workstation +
+  VirtualBox 7.2 installed; zero VMs running → truthful
+  `REAL VM VALIDATION: SKIPPED — NO RUNNING VM`; all three providers
+  fixture-tested.
+
+### Robustness fixes found during live validation (all regression-tested)
+
+- **WSL empty-enumeration truthfulness**: the WSL service (LxssManager) can
+  return EMPTY `wsl --list --verbose` output while `--status`/`--running`
+  still answer; the collector previously treated that as "no WSL installed"
+  and silently wiped the WSL nodes from the graph. Now: plain `wsl --list`
+  fallback probe recovers the distributions; when both probes fail the
+  failure is surfaced truthfully as an error (`wsl.py` + 3 tests).
+- **Last-good infra state**: a transient collector failure no longer wipes
+  the graph to "not installed / engine UNKNOWN" — the loop keeps the last
+  good observation (error text set) for services/WSL/Docker/VM.
+- **First-tick baseline**: `infra_engine.update()` never runs before the
+  first real snapshot exists (an empty-services baseline made every
+  running service look "new" → a 120-event startup storm).
+- **`unknown` is not a transition**: a transiently unreadable service
+  status (AccessDenied under load) flipping to/from `running` no longer
+  emits fake SERVICE_STARTED/STOPPED events.
+- **ETW diagnostic counters**: `/api/telemetry/debug` now exposes
+  `tuple_map_size` / `wildcard_map_size` (aggregator evidence-map size) so
+  attribution freezes are distinguishable from empty topology.
+- **Real-ETW validation note**: this machine's acceptance runs DO reach
+  real TIER2 (elevated terminal); a stale `esw-telemetry` ETW session left
+  over from a killed backend freezes edge attribution (provider receives,
+  TCB hits climb, `events_mapped_to_edges` stays 0) — the documented
+  clean-session procedure (kill backend → `logman stop esw-telemetry -ets`
+  → restart) is mandatory before acceptance. Verified: with a clean
+  session table, real per-edge mapping and DATA particles flow again
+  (`events_mapped_to_edges > 0` on ambient traffic within seconds).
+
 ## [0.3.1] — 2026-08-20
 
 Large graph performance + long-run stability checkpoint (Phase 20

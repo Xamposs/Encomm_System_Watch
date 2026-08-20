@@ -756,6 +756,21 @@ body,
 .ai-mcp { color: #c4b5fd; border-color: #7c6bb0; }
 .ai-gpu { color: #a7f3d0; border-color: #34d399; }
 
+/* infrastructure summary chips in the header (v0.4.0) */
+.infra-summary {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  margin-right: 10px;
+}
+.infra-services { color: #f0d9a8; border-color: #d9a03c; }
+.infra-wsl { color: #a5f3fc; border-color: #22d3ee; }
+.infra-docker { color: #99f6e4; border-color: #2dd4bf; }
+.infra-docker-off { color: #94a3b8; border-color: #5c6b7a; }
+.infra-vm { color: #f5d0fe; border-color: #d946ef; }
+
 /* SYSTEM / AI view pills */
 .pill.sem-view.ai-active { border-color: #8b5cf6; color: #d8c9ff; }
 
@@ -784,6 +799,12 @@ body,
 
 /* event drawer semantic rows */
 .ev-semantic { border-left-color: #8b5cf6; }
+
+/* event drawer infrastructure rows (v0.4.0) */
+.ev-service { border-left-color: #d9a03c; }
+.ev-container { border-left-color: #2dd4bf; }
+.ev-wsl { border-left-color: #22d3ee; }
+.ev-vm { border-left-color: #d946ef; }
 .ev-semantic-lost { border-left-color: #5c6b7a; opacity: 0.7; }
 .ev-model { border-left-color: #38bdf8; }
 .ev-gpu { border-left-color: #34d399; }
@@ -794,6 +815,13 @@ body,
 .lg-node.lg-llm { background: #10273a; border-color: #38bdf8; }
 .lg-node.lg-gpu { background: #12251f; border-color: #34d399; }
 .lg-edge.lg-sem-e { color: #8b5cf6; }
+
+/* legend infrastructure entries (v0.4.0) */
+.lg-node.lg-svc { background: #2a2517; border-color: #d9a03c; }
+.lg-node.lg-wsl { background: #0f2730; border-color: #22d3ee; }
+.lg-node.lg-dkr { background: #0f2a23; border-color: #2dd4bf; }
+.lg-node.lg-vm { background: #2a1220; border-color: #d946ef; }
+.lg-edge.lg-infra-e { color: #d9a03c; }
 
 /* ------------------------------------------------------ v0.3.1 additions */
 

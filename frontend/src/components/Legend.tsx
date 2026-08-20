@@ -23,6 +23,13 @@ export function Legend() {
         <span className="lg-node lg-gpu">▭</span> GPU
         <span className="lg-edge lg-sem-e">╌╌</span> AI RELATION
       </div>
+      <div className="legend-row">
+        <span className="lg-node lg-svc">⚙</span> SERVICE
+        <span className="lg-node lg-wsl">⬡</span> WSL
+        <span className="lg-node lg-dkr">◆</span> DOCKER
+        <span className="lg-node lg-vm">▣</span> VM
+        <span className="lg-edge lg-infra-e">╌╌</span> INFRA RELATION
+      </div>
       <div className="legend-row legend-hint">SHIFT+DRAG SELECT · DBL-CLICK FOCUS · 100% READ-ONLY</div>
     </div>
   )
