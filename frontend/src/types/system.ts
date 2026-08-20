@@ -14,6 +14,8 @@ export type NodeKind =
   | 'CONTAINER'
   | 'DOCKER_NETWORK'
   | 'VM'
+  // ---- transient AI runtime nodes (v0.5.0) ----
+  | 'AI_RUNTIME'
 export type EdgeKind =
   | 'LOCALHOST'
   | 'EXTERNAL'
@@ -30,6 +32,20 @@ export type EdgeKind =
   | 'EXPOSES'
   | 'CONNECTED_TO'
   | 'BACKED_BY'
+  // ---- application-level AI relationships (v0.5.0) ----
+  | 'AI_CALL'
+export type AiEventType =
+  | 'AGENT_RUN_STARTED'
+  | 'AGENT_RUN_FINISHED'
+  | 'MODEL_REQUEST_STARTED'
+  | 'MODEL_REQUEST_FINISHED'
+  | 'TOOL_CALL_STARTED'
+  | 'TOOL_CALL_FINISHED'
+  | 'MCP_CALL_STARTED'
+  | 'MCP_CALL_FINISHED'
+  | 'AGENT_MESSAGE'
+  | 'RETRY'
+  | 'AI_ERROR'
 export type EventType =
   | 'PROCESS_STARTED'
   | 'PROCESS_STOPPED'
@@ -60,6 +76,8 @@ export type EventType =
   | 'VM_DETECTED'
   | 'VM_LOST'
   | 'VM_STATE_CHANGED'
+  // ---- application-level AI telemetry (v0.5.0) ----
+  | AiEventType
 export type Filter = 'all' | 'active' | 'listening' | 'highcpu'
 export type ConnectionStatus = 'connecting' | 'live' | 'disconnected'
 export type ViewMode = 'nodes' | 'families'
@@ -166,6 +184,65 @@ export interface BenchmarkMeta {
   seed: number
 }
 
+// ---- application-level AI telemetry (v0.5.0) --------------------------------
+
+/** One normalized application-level AI telemetry event (metadata only). */
+export interface AiTelemetryEvent {
+  event_id: string
+  timestamp: string
+  source: string
+  event_type: AiEventType
+  test_only?: boolean
+  agent_id?: string
+  agent_name?: string
+  model_id?: string
+  tool_name?: string
+  trace_id?: string
+  span_id?: string
+  parent_span_id?: string
+  status?: string
+  duration_ms?: number
+  input_tokens?: number
+  output_tokens?: number
+  total_tokens?: number
+  tps?: number
+  context_tokens?: number
+  metadata?: Record<string, unknown>
+  /** Graph placement hint computed by the backend buffer (never guessed). */
+  runtime?: {
+    node_id: string
+    parent_node_id: string | null
+    kind: string
+    label?: string
+    test_only?: boolean
+    finished?: boolean
+  }
+}
+
+export type AiProviderStateName = 'ACTIVE' | 'AVAILABLE_NO_DATA' | 'UNAVAILABLE' | 'DEGRADED'
+
+/** Provider status (section 26): ACTIVE / AVAILABLE_NO_DATA / UNAVAILABLE /
+ * DEGRADED with the truthful per-metric availability matrix. */
+export interface AiProviderState {
+  name: string
+  kind: string
+  state: AiProviderStateName
+  detail: string
+  test_only: boolean
+  availability: Record<string, boolean>
+  last_poll?: number
+  last_error?: string | null
+}
+
+/** Compact AI metrics — only fields with real values are present. */
+export interface AiMetrics {
+  runs: number
+  tokens_per_s?: number
+  tools?: number
+  model?: string
+  errors?: number
+}
+
 export interface SystemEvent {
   event_id: string
   event_type: EventType
@@ -220,4 +297,13 @@ export type ServerMessage =
       nodes: NetworkActivityNode[]
     }
   | { type: 'gpu'; data: GpuInfo[]; ts: number }
+  // ---- application-level AI telemetry (v0.5.0) ----
+  | { type: 'ai_activity'; ts: number; fixture: boolean; events: AiTelemetryEvent[] }
+  | { type: 'ai_metrics'; ts: number; fixture: boolean; metrics: AiMetrics }
+  | {
+      type: 'ai_provider_status'
+      ts: number
+      fixture: boolean
+      providers: Record<string, AiProviderState>
+    }
   | { type: 'ping'; ts: number }

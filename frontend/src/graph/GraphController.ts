@@ -8,6 +8,7 @@ import cytoscape, {
 } from 'cytoscape'
 import fcose from 'cytoscape-fcose'
 import type {
+  AiTelemetryEvent,
   Filter,
   GpuInfo,
   NetworkActivityItem,
@@ -251,6 +252,47 @@ export const STYLESHEET: StylesheetStyle[] = [
     selector: 'node[?benchmark]',
     style: { 'border-style': 'dashed', 'border-color': '#7d8fa3' },
   },
+  // ---- transient AI runtime nodes (v0.5.0) -------------------------------
+  // Application-level AI telemetry (agent runs / model requests / tool /
+  // MCP calls) — visually distinct from process and semantic nodes, and
+  // TEST/FIXTURE nodes get a dashed border + test color.
+  {
+    selector: 'node[kind = "AI_RUNTIME"]',
+    style: {
+      shape: 'hexagon', width: 118, height: 40, 'background-color': '#1c1430',
+      'border-color': '#8b5cf6', 'border-width': 1.6, color: '#e9d5ff',
+      'font-size': 8,
+    },
+  },
+  {
+    selector: 'node[kind = "AI_RUNTIME"][ai_role = "MODEL_REQUEST"]',
+    style: { 'border-color': '#38bdf8', color: '#bae6fd' },
+  },
+  {
+    selector: 'node[kind = "AI_RUNTIME"][ai_role = "TOOL_CALL"]',
+    style: { 'border-color': '#fbbf24', color: '#fde68a' },
+  },
+  {
+    selector: 'node[kind = "AI_RUNTIME"][ai_role = "MCP_CALL"]',
+    style: { 'border-color': '#f472b6', color: '#fbcfe8' },
+  },
+  {
+    selector: 'node[kind = "AI_RUNTIME"][ai_role = "AI_ERROR"]',
+    style: { 'border-color': '#f87171', color: '#fecaca' },
+  },
+  {
+    selector: 'node[kind = "AI_RUNTIME"][?ai_test_only]',
+    style: { 'border-style': 'dashed', 'border-color': '#9f1239', color: '#fda4af' },
+  },
+  // application-level AI relationship (proven telemetry, not network bytes)
+  {
+    selector: 'edge[kind = "AI_CALL"]',
+    style: {
+      'line-color': '#a855f7', 'target-arrow-color': '#a855f7',
+      'target-arrow-shape': 'triangle', 'arrow-scale': 0.8,
+      'line-style': 'dashed', width: 1.4, opacity: 0.75,
+    },
+  },
 ]
 
 function portLabel(ports: number[]): string {
@@ -293,6 +335,14 @@ const ZOOM_CLOSE = 0.95
 const LARGE_GRAPH_NODES = 600
 const LARGE_GRAPH_MIN_BATCH = 40
 
+// ---- transient AI runtime node budgets (v0.5.0) ---------------------------
+// High-frequency AI events must never permanently explode graph node count:
+// hard node cap + per-role TTL, pruned by the shared 1 s decay timer.
+const MAX_AI_RUNTIME_NODES = 24
+const AI_RUN_TTL_MS = 90_000
+const AI_RUN_FINISHED_TTL_MS = 12_000
+const AI_SPAN_TTL_MS = 45_000
+
 /**
  * Imperative controller over a single Cytoscape instance. All graph mutations
  * happen here (cy.batch), bypassing React — React only drives stats/events/
@@ -310,6 +360,13 @@ export class GraphController {
   private edgeActivity = new Map<string, EdgeActivityState>()
   private activityMuted = false
   private activityDecayTimer: number | undefined
+  // ---- transient AI runtime nodes (v0.5.0) -----------------------------
+  // Bounded, time-decayed application-level AI objects. node_id -> expiry
+  // (performance.now() ms); pruned by the SAME shared 1 s timer as network
+  // activity decay, so high-frequency AI events can never permanently grow
+  // the graph (cap + TTL below).
+  private aiRuntimeNodes = new Map<string, { expires: number; data: Record<string, unknown> }>()
+  private aiRuntimeEdges = new Set<string>()
   private telemetrySource = 'SOCKET EVENTS'
   private familyView: ViewMode = 'nodes'
   private focusNode: string | null = null
@@ -393,6 +450,8 @@ export class GraphController {
   private isSemanticNode(el: NodeSingular): boolean {
     const kind = el.data('kind')
     if (kind === 'SEMANTIC' || kind === 'LOCAL_LLM' || kind === 'GPU') return true
+    // transient AI runtime nodes belong to the AI view (v0.5.0)
+    if (kind === 'AI_RUNTIME') return true
     return !!(el.data('semantic') || el.data('gpu_attributed'))
   }
 
@@ -582,6 +641,163 @@ export class GraphController {
     perf.recordActivityBatch(performance.now() - t0)
   }
 
+  // ------------------------------------------------- application AI telemetry
+
+  /**
+   * Feed one batch of normalized application-level AI events (the
+   * ``ai_activity`` WS message). Creates bounded transient runtime nodes
+   * (AGENT RUN / MODEL REQUEST / TOOL CALL / MCP CALL) linked ONLY to
+   * proven parents — ``runtime.parent_node_id`` (backend trace evidence),
+   * ``sem:hermes`` (agent identity evidence), or a LOCAL_LLM node with an
+   * exact ``model_id`` match. TEST/FIXTURE events are marked
+   * ``ai_test_only`` and drive the distinct AI signal lane (fuchsia
+   * diamonds) — never the DATA particle lane.
+   */
+  applyAiActivity(events: AiTelemetryEvent[]): void {
+    if (events.length === 0 || this.activityMuted) return
+    const now = performance.now()
+    const defs: ElementDefinition[] = []
+    const signals: { edge_id: string; test_only?: boolean }[] = []
+
+    // exact model_id -> LOCAL_LLM node lookup (few nodes; linear is fine)
+    const llmNodes: { id: string; models: { id: string }[] }[] = []
+    this.cy.nodes('[kind = "LOCAL_LLM"]').forEach((n) => {
+      llmNodes.push({ id: n.id(), models: (n.data('models') as { id: string }[]) ?? [] })
+    })
+
+    this.cy.batch(() => {
+      for (const ev of events) {
+        const rt = ev.runtime
+        if (!rt?.node_id) continue
+        const testOnly = Boolean(rt.test_only || ev.test_only)
+        const role = rt.kind === 'AI_ERROR' ? 'AI_ERROR' : rt.kind
+        const isRun = rt.kind === 'AGENT_RUN'
+        const ttl = isRun
+          ? (rt.finished ? AI_RUN_FINISHED_TTL_MS : AI_RUN_TTL_MS)
+          : AI_SPAN_TTL_MS
+        const label = `${testOnly ? '[TEST] ' : ''}${rt.label ?? rt.kind.replace(/_/g, ' ')}`
+        const data: Record<string, unknown> = {
+          id: rt.node_id,
+          kind: 'AI_RUNTIME',
+          ai_role: role,
+          label,
+          ai_test_only: testOnly || undefined,
+          ai_status: ev.status,
+          ai_model: ev.model_id,
+          ai_tool: ev.tool_name,
+          ai_trace: ev.trace_id,
+          ai_agent: ev.agent_name ?? ev.agent_id,
+          ai_tokens: ev.total_tokens,
+          ai_tps: ev.tps,
+          ai_latency: ev.duration_ms,
+        }
+        this.aiRuntimeNodes.set(rt.node_id, { expires: now + ttl, data })
+        while (this.aiRuntimeNodes.size > MAX_AI_RUNTIME_NODES) {
+          const oldest = this.aiRuntimeNodes.keys().next().value
+          if (oldest === undefined) break
+          this.aiRuntimeNodes.delete(oldest)
+        }
+        const existing = this.cy.getElementById(rt.node_id)
+        if (existing.length) {
+          existing.data(data)
+        } else {
+          defs.push({ group: 'nodes', data, position: this.aiNodePosition(rt.parent_node_id) })
+        }
+
+        // ---- proven linkage (never invented parentage) ------------------
+        const links: [string, string][] = []
+        if (rt.parent_node_id && this.cy.getElementById(rt.parent_node_id).length) {
+          links.push([rt.parent_node_id, rt.node_id])
+        }
+        if (isRun && !rt.finished) {
+          const agent = `${ev.agent_name ?? ''} ${ev.agent_id ?? ''}`.toLowerCase()
+          if (agent.includes('hermes') && this.cy.getElementById('sem:hermes').length) {
+            links.push(['sem:hermes', rt.node_id])
+          }
+        }
+        if (ev.model_id && !isRun) {
+          const hit = llmNodes.find((n) => n.models.some((m) => m.id === ev.model_id))
+          if (hit) links.push([rt.node_id, hit.id])
+        }
+        for (const [src, tgt] of links) {
+          const eid = `ai:${src}->${tgt}`
+          if (this.cy.getElementById(eid).length) {
+            signals.push({ edge_id: eid, test_only: testOnly })
+            continue
+          }
+          this.aiRuntimeEdges.add(eid)
+          defs.push({
+            group: 'edges',
+            data: {
+              id: eid, source: src, target: tgt, kind: 'AI_CALL', proto: 'ai',
+              ports: [], active: true, directed: true, ai_test_only: testOnly || undefined,
+            },
+          })
+          signals.push({ edge_id: eid, test_only: testOnly })
+        }
+      }
+    })
+
+    if (defs.length > 0) {
+      this.cy.add(defs)
+      this.pendingNewNodes += defs.filter((d) => d.group === 'nodes').length
+      this.scheduleIncrementalLayout()
+    }
+    if (signals.length > 0) this.overlay.applyAiSignals(signals)
+    if (this.aiRuntimeNodes.size > 0) this.ensureActivityDecayTimer()
+    if (this.view !== 'system') this.applyView()
+  }
+
+  /** Place a new runtime node near its proven parent, else view center. */
+  private aiNodePosition(parentId: string | null | undefined): { x: number; y: number } {
+    if (parentId) {
+      const p = this.cy.getElementById(parentId)
+      if (p.length) {
+        const pos = p.position()
+        return { x: pos.x + (Math.random() - 0.5) * 140, y: pos.y + (Math.random() - 0.5) * 140 }
+      }
+    }
+    const ext = this.cy.extent()
+    return {
+      x: (ext.x1 + ext.x2) / 2 + (Math.random() - 0.5) * 120,
+      y: (ext.y1 + ext.y2) / 2 + (Math.random() - 0.5) * 120,
+    }
+  }
+
+  /** Read-only AI telemetry diagnostics for acceptance / debugging. */
+  aiStats(): {
+    runtimeNodes: number
+    runtimeEdges: number
+    overlayAiSignals: number
+    overlayAiParticles: number
+    maxRuntimeNodes: number
+  } {
+    const s = this.overlay.stats()
+    return {
+      runtimeNodes: this.aiRuntimeNodes.size,
+      runtimeEdges: this.aiRuntimeEdges.size,
+      overlayAiSignals: s.aiSignals,
+      overlayAiParticles: s.aiParticles,
+      maxRuntimeNodes: MAX_AI_RUNTIME_NODES,
+    }
+  }
+
+  /** TEST ONLY (acceptance AC): clear AI runtime state deterministically. */
+  testClearAiRuntime(): void {
+    this.cy.batch(() => {
+      for (const nid of [...this.aiRuntimeNodes.keys()]) {
+        const el = this.cy.getElementById(nid)
+        if (el.length) el.remove()
+      }
+      for (const eid of [...this.aiRuntimeEdges]) {
+        const el = this.cy.getElementById(eid)
+        if (el.length) el.remove()
+      }
+    })
+    this.aiRuntimeNodes.clear()
+    this.aiRuntimeEdges.clear()
+  }
+
   /**
    * TEST ONLY (benchmark mode): inject synthetic activity batches to
    * exercise the particle budget deterministically. Throws outside
@@ -630,11 +846,38 @@ export class GraphController {
     }
     // node-halo rates decay independently of edge staleness
     this.clearStaleNodeRates()
+    // transient AI runtime nodes decay by wall-clock age (bounded graph)
+    this.decayAiRuntimeNodes()
     const nodesWithRates = this.cy.nodes('[?last_activity]').length
-    if (this.edgeActivity.size === 0 && nodesWithRates === 0 && this.activityDecayTimer !== undefined) {
+    if (this.edgeActivity.size === 0 && nodesWithRates === 0 &&
+        this.aiRuntimeNodes.size === 0 && this.activityDecayTimer !== undefined) {
       clearInterval(this.activityDecayTimer)
       this.activityDecayTimer = undefined
     }
+  }
+
+  /** Time-decay transient AI runtime nodes (TTL per role, hard cap). */
+  private decayAiRuntimeNodes(): void {
+    const now = performance.now()
+    const expired: string[] = []
+    for (const [nid, st] of this.aiRuntimeNodes) {
+      if (now > st.expires) expired.push(nid)
+    }
+    if (expired.length === 0) return
+    this.cy.batch(() => {
+      for (const nid of expired) {
+        this.aiRuntimeNodes.delete(nid)
+        const el = this.cy.getElementById(nid)
+        if (el.length) el.remove()
+        for (const eid of [...this.aiRuntimeEdges]) {
+          const e = this.cy.getElementById(eid)
+          if (e.length && (e.source().id() === nid || e.target().id() === nid)) {
+            this.aiRuntimeEdges.delete(eid)
+            e.remove()
+          }
+        }
+      }
+    })
   }
 
   /** Process nodes keep their ↓/↑ rates only while telemetry is fresh. */
@@ -695,6 +938,30 @@ export class GraphController {
         })),
       ]
       this.cy.add(defs)
+      // transient AI runtime nodes are NOT part of the backend snapshot —
+      // re-add the survivors so a snapshot refresh never wipes live AI state
+      for (const [nid, st] of this.aiRuntimeNodes) {
+        if (!this.cy.getElementById(nid).length) {
+          this.cy.add({
+            group: 'nodes', data: { ...st.data, id: nid },
+            position: this.aiNodePosition(null),
+          })
+        }
+      }
+      for (const eid of this.aiRuntimeEdges) {
+        if (this.cy.getElementById(eid).length) continue
+        const [src, tgt] = eid.slice(3).split('->')
+        if (!src || !tgt) continue
+        if (this.cy.getElementById(src).length && this.cy.getElementById(tgt).length) {
+          this.cy.add({
+            group: 'edges',
+            data: {
+              id: eid, source: src, target: tgt, kind: 'AI_CALL', proto: 'ai',
+              ports: [], active: true, directed: true,
+            },
+          })
+        }
+      }
     })
     this.pendingNewNodes = 0
     this.labelCache.clear()

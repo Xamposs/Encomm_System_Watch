@@ -756,6 +756,15 @@ body,
 .ai-mcp { color: #c4b5fd; border-color: #7c6bb0; }
 .ai-gpu { color: #a7f3d0; border-color: #34d399; }
 
+/* application-level AI telemetry chips (v0.5.0) — real evidence only */
+.ai-tel-active { color: #f0abfc; border-color: #a855f7; }
+.ai-tel-degraded { color: #fcd34d; border-color: #a08a2f; }
+.ai-tel-fixture { color: #fda4af; border-color: #9f1239; }
+.ai-tel-run { color: #e9d5ff; border-color: #7c3aed; }
+.ai-tel-tokens { color: #a5e3ff; border-color: #38bdf8; }
+.ai-tel-tools { color: #fde68a; border-color: #d97706; }
+.ai-tel-model { color: #bae6fd; border-color: #0284c7; }
+
 /* infrastructure summary chips in the header (v0.4.0) */
 .infra-summary {
   display: flex;
@@ -809,6 +818,15 @@ body,
 .ev-model { border-left-color: #38bdf8; }
 .ev-gpu { border-left-color: #34d399; }
 .ev-gpu-detach { border-left-color: #5c6b7a; }
+
+/* event drawer AI telemetry rows (v0.5.0) — application-level metadata */
+.ev-ai { border-left-color: #a855f7; }
+.ev-ai-model { border-left-color: #38bdf8; }
+.ev-ai-tool { border-left-color: #fbbf24; }
+.ev-ai-error { border-left-color: #f87171; background: rgba(248, 113, 113, 0.07); }
+
+/* inspector AI TELEMETRY section (v0.5.0) */
+.sem-note { color: #5c6b7a; font-size: 9px; }
 
 /* legend semantic entries */
 .lg-node.lg-sem { background: #231a3d; border-color: #8b5cf6; }

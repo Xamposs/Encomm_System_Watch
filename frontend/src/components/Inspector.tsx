@@ -84,6 +84,42 @@ function SemanticSection({ node }: { node: Record<string, unknown> }) {
   )
 }
 
+/** AI TELEMETRY block (v0.5.0) — transient runtime nodes + any node with
+ * application-level AI evidence. Only real fields are rendered; nothing
+ * is estimated. TEST/FIXTURE nodes are labeled. */
+function AiTelemetrySection({ node }: { node: Record<string, unknown> }) {
+  const isRuntime = node.kind === 'AI_RUNTIME'
+  const role = node.ai_role as string | undefined
+  if (!isRuntime && !role) return null
+  const testOnly = Boolean(node.ai_test_only)
+  const rows: { k: string; v: string }[] = []
+  if (role) rows.push({ k: 'ROLE', v: role.replace(/_/g, ' ') })
+  if (typeof node.ai_status === 'string') rows.push({ k: 'STATUS', v: String(node.ai_status).toUpperCase() })
+  if (typeof node.ai_agent === 'string') rows.push({ k: 'AGENT', v: node.ai_agent as string })
+  if (typeof node.ai_model === 'string') rows.push({ k: 'MODEL', v: node.ai_model as string })
+  if (typeof node.ai_tool === 'string') rows.push({ k: 'TOOL', v: node.ai_tool as string })
+  if (typeof node.ai_trace === 'string') rows.push({ k: 'TRACE', v: node.ai_trace as string })
+  if (typeof node.ai_tokens === 'number') rows.push({ k: 'TOKENS', v: `${node.ai_tokens}` })
+  if (typeof node.ai_tps === 'number') rows.push({ k: 'TPS', v: `${node.ai_tps}` })
+  if (typeof node.ai_latency === 'number') rows.push({ k: 'LATENCY', v: `${Math.round(node.ai_latency)} ms` })
+  if (rows.length === 0) return null
+  return (
+    <div className="inspector-net">
+      <div className="inspector-net-title">
+        AI TELEMETRY{testOnly ? ' · TEST/FIXTURE' : ''}
+      </div>
+      {rows.map((r) => (
+        <div className="inspector-net-row" key={r.k}>
+          {r.k}: {r.v}
+        </div>
+      ))}
+      <div className="inspector-net-row sem-note">
+        application-level metadata — never prompt or response content
+      </div>
+    </div>
+  )
+}
+
 /** GPU metrics block for GPU nodes. */
 function GpuSection({ node }: { node: Record<string, unknown> }) {
   const processes = node.processes as { pid: number; vram_mb?: number }[] | undefined
@@ -402,6 +438,8 @@ export function Inspector({ node, onClose }: Props) {
       </div>
       {/* SEMANTIC section — only when classification exists */}
       <SemanticSection node={node} />
+      {/* AI TELEMETRY section (v0.5.0) — runtime nodes + AI evidence */}
+      <AiTelemetrySection node={node} />
       {/* GPU section — only for GPU nodes */}
       {kind === 'GPU' && <GpuSection node={node} />}
       {/* INFRA section (v0.4.0) — services / WSL / Docker / VMs */}

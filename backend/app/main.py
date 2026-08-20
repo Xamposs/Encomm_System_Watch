@@ -14,8 +14,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -143,6 +144,19 @@ benchmark = BenchmarkMode()
 _etw_freeze_s = float(os.environ.get("ESW_ETW_HEALTH_FREEZE_S", "45"))
 etw_health = EtwAttributionHealth(freeze_threshold_s=_etw_freeze_s)
 
+# ---- REAL application-level AI telemetry (v0.5.0) ---------------------------
+# Normalized metadata pipeline with failure-isolated providers: the Hermes
+# gateway status API adapter (real, read-only, localhost) + the OTEL seam
+# (READY / NO REAL PRODUCER). TEST/FIXTURE/SYNTHETIC mode is env-gated
+# (ESW_AI_TELEMETRY_FIXTURE=1) and never mixes with real mode. Disabled in
+# demo mode so the synthetic data path stays pure.
+if not cfg.demo_mode:
+    from .ai_telemetry import AiTelemetryRegistry
+
+    ai_registry = AiTelemetryRegistry(poll_interval_s=5.0)
+else:
+    ai_registry = None  # type: ignore[assignment]
+
 _state = {
     "snapshot": None,
     "topology": None,
@@ -204,6 +218,18 @@ def _capability_event(cap: Capability, event_id: str) -> dict:
         timestamp=datetime.now().astimezone().isoformat(timespec="milliseconds"),
         metadata=cap.to_dict(),
     ).to_dict()
+
+
+def _ai_message_allowed(msg: dict) -> bool:
+    """AI telemetry messages never mix into the TEST-ONLY benchmark graph.
+
+    While benchmark mode is active the WS serves the synthetic fixture;
+    real AI telemetry (and its drawer rows) is suppressed at the send
+    seam so synthetic and real data can never mix.
+    """
+    if msg.get("type") not in ("ai_activity", "ai_metrics", "ai_provider_status"):
+        return True
+    return not benchmark.active
 
 
 def _stats_dict() -> dict:
@@ -672,11 +698,19 @@ async def lifespan(_: FastAPI):
     ttask = asyncio.create_task(_telemetry_loop())
     gtask = asyncio.create_task(_gpu_loop())
     itask = asyncio.create_task(_infra_loop())
+    atask = None
+    if ai_registry is not None:
+        ai_registry.publish_message = stream.publish_message
+        ai_registry.publish_events = stream.publish
+        ai_registry.start()
+        atask = asyncio.create_task(ai_registry.run_loop())
     yield
     task.cancel()
     ttask.cancel()
     gtask.cancel()
     itask.cancel()
+    if atask is not None:
+        atask.cancel()
     try:
         await task
     except asyncio.CancelledError:
@@ -693,11 +727,18 @@ async def lifespan(_: FastAPI):
         await itask
     except asyncio.CancelledError:
         pass
+    if atask is not None:
+        try:
+            await atask
+        except asyncio.CancelledError:
+            pass
+    if ai_registry is not None:
+        ai_registry.stop()
     if telemetry_provider is not None:
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="0.5.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -840,6 +881,78 @@ async def api_semantic() -> dict:
     }
 
 
+# ---- REAL application-level AI telemetry (v0.5.0) ---------------------------
+# Read-only status endpoint + OPTIONAL local ingestion endpoint for explicit
+# trusted local instrumentation. OBSERVE ONLY: ingestion validates bounded
+# metadata, it cannot execute tools, launch agents, call models, send MCP
+# commands or run shell commands (proven by security tests).
+
+
+@app.get("/api/ai-telemetry")
+async def api_ai_telemetry() -> dict:
+    """Current AI telemetry state: provider states, active runs, metrics.
+
+    Metadata only — no private payload contents ever.
+    """
+    if ai_registry is None:
+        return JSONResponse(status_code=503, content={
+            "error": "ai telemetry disabled (demo mode)",
+            "fixture_mode": False,
+            "providers": {},
+        })
+    return ai_registry.snapshot()
+
+
+@app.post("/api/ai-telemetry/events")
+async def api_ai_telemetry_ingest(
+    req: Request,
+) -> JSONResponse:
+    """Ingest ONE bounded normalized metadata event (localhost only).
+
+    Explicit trusted local instrumentation only. Bounds: 64 KB per
+    request, schema-whitelisted fields (extra fields rejected), metadata
+    ≤ 32 keys with bounded values, private content rejected. No
+    execution/control paths exist on this route (OBSERVE ONLY).
+    """
+    if ai_registry is None:
+        return JSONResponse(status_code=503, content={
+            "error": "ai telemetry disabled (demo mode)",
+        })
+    length = req.headers.get("content-length")
+    if length is not None and length.isdigit() and int(length) > 64 * 1024:
+        return JSONResponse(status_code=413, content={
+            "error": "payload exceeds 64 KB bound",
+        })
+    body = await req.body()
+    if len(body) > 64 * 1024:
+        return JSONResponse(status_code=413, content={
+            "error": "payload exceeds 64 KB bound",
+        })
+    try:
+        from .ai_telemetry.ingest import AITelemetryEventIn
+
+        parsed = AITelemetryEventIn.model_validate_json(body)
+    except Exception as exc:  # noqa: BLE001 — validation failures are client errors
+        return JSONResponse(status_code=422, content={
+            "error": "invalid ai telemetry payload",
+            "detail": str(exc).splitlines()[0][:300],
+        })
+    try:
+        ev = ai_registry.ingest_external(**parsed.model_dump())
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={
+            "error": str(exc),
+        })
+    d = ev.to_dict()
+    return {
+        "accepted": 1,
+        "event_id": d.get("event_id"),
+        "event_type": d.get("event_type"),
+        "test_only": d.get("test_only", False),
+        "fixture": ai_registry.fixture_mode,
+    }
+
+
 @app.get("/api/infra")
 async def api_infra() -> dict:
     """Current infrastructure state (v0.4.0) — services/WSL/Docker/VMs.
@@ -870,9 +983,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
             except asyncio.TimeoutError:
                 item = None
             if item is not None:
-                if item.get("type") in ("network_activity", "gpu"):
-                    # already a complete protocol message (activity batch / gpu state)
-                    await ws.send_json(item)
+                if item.get("type") in ("network_activity", "gpu", "ai_activity",
+                                        "ai_metrics", "ai_provider_status"):
+                    # already a complete protocol message (activity batch /
+                    # gpu state / AI telemetry) — route it through
+                    # benchmark/demo suppression before sending
+                    if _ai_message_allowed(item):
+                        await ws.send_json(item)
                 else:
                     batch = [item]
                     while len(batch) < cfg.max_event_batch:
@@ -880,8 +997,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             nxt = queue.get_nowait()
                         except asyncio.QueueEmpty:
                             break
-                        if nxt.get("type") in ("network_activity", "gpu"):
-                            await ws.send_json(nxt)
+                        if nxt.get("type") in ("network_activity", "gpu",
+                                               "ai_activity", "ai_metrics",
+                                               "ai_provider_status"):
+                            if _ai_message_allowed(nxt):
+                                await ws.send_json(nxt)
                             continue
                         batch.append(nxt)
                     await ws.send_json({"type": "events", "data": batch})

@@ -8,7 +8,11 @@ machine is actually doing, in real time. Since v0.3.0 the map also understands
 are detected with evidence-backed confidence, layered on top of the raw
 process truth. Since v0.4.0 it understands the **infrastructure layer**:
 Windows Services, WSL distributions, Docker Engine/containers and local
-virtual machines — all strictly read-only.
+virtual machines — all strictly read-only. Since v0.5.0 it carries **real
+application-level AI telemetry**: a normalized metadata pipeline fed by the
+Hermes gateway status API (read-only), an optional bounded localhost
+ingestion endpoint for explicit instrumentation, and an OpenTelemetry seam —
+with an explicit evidence boundary (see below).
 
 > The graph is the product. This is **not** a traditional metrics dashboard.
 
@@ -105,6 +109,43 @@ REACT + TYPESCRIPT ── Cytoscape graph, canvas pulse overlay, inspector,
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PHASES.md](docs/PHASES.md).
+
+## AI telemetry — evidence boundary (v0.5.0)
+
+SYSTEM WATCH never converts OS/network evidence into AI claims:
+
+| OS / network evidence | Is NOT | Application AI telemetry requires |
+|---|---|---|
+| process relationship | a tool call | explicit app-level telemetry |
+| network bytes | tokens | explicit token counts |
+| socket throughput | TPS | explicit token + duration |
+| TCP connection to an MCP server | an MCP call | explicit app-level evidence |
+
+The AI telemetry pipeline (`backend/app/ai_telemetry/`) only emits
+normalized events when a real application-level source provides them:
+
+- **Hermes provider (REAL)** — discovers `hermes_cli.main … serve`
+  gateway processes and their localhost listeners, polls the
+  unauthenticated `GET /api/status` + `/api/health` endpoints and emits
+  `AGENT_RUN_STARTED/FINISHED` from real `active_agents` count deltas.
+  Deep metrics (tokens, TPS, tool names, MCP calls, traces) are
+  **UNAVAILABLE** on this machine (401-protected / not exposed) and are
+  reported exactly that way — never estimated.
+- **OTEL seam** — lightweight normalization of `gen_ai.*` / `agent.*`
+  spans. Status: READY / NO REAL PRODUCER.
+- **Local ingestion (OPTIONAL)** — `POST /api/ai-telemetry/events` for
+  explicit trusted local instrumentation: localhost-only, 64 KB bound,
+  schema-whitelisted, private content rejected, OBSERVE ONLY (no
+  execution/control paths).
+- **Fixture provider (TEST)** — env-gated
+  (`ESW_AI_TELEMETRY_FIXTURE=1`), every event labeled
+  TEST/FIXTURE/SYNTHETIC, never active in real mode.
+
+Read-only surface: `GET /api/ai-telemetry` (provider states, active
+runs, metrics, caps) and WS `ai_activity` / `ai_metrics` /
+`ai_provider_status` (change-only). Privacy: prompts, responses,
+reasoning, tool arguments, file contents and credentials are never
+ingested.
 
 ## What it shows (all real)
 

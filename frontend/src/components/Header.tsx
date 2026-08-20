@@ -1,4 +1,13 @@
-import type { ConnectionStatus, InfraSummary, Mode, SemanticSummary, Stats, TelemetryInfo } from '../types/system'
+import type {
+  AiMetrics,
+  AiProviderState,
+  ConnectionStatus,
+  InfraSummary,
+  Mode,
+  SemanticSummary,
+  Stats,
+  TelemetryInfo,
+} from '../types/system'
 import { fmtBps } from '../graph/GraphController'
 
 interface Props {
@@ -7,6 +16,9 @@ interface Props {
   stats: Stats | null
   feedTs: number | null
   telemetry: TelemetryInfo | null
+  aiMetrics?: AiMetrics | null
+  aiProviders?: Record<string, AiProviderState> | null
+  aiFixture?: boolean
 }
 
 function telemetryLabel(t: TelemetryInfo | null): { text: string; cls: string } {
@@ -51,6 +63,67 @@ export function AiSummary({ semantic }: { semantic?: SemanticSummary }) {
   if (chips.length === 0) return null
   return (
     <div className="ai-summary" title="AI semantic summary — only real detections">
+      {chips.map((c, i) => (
+        <span key={i} className={`ai-chip ${c.cls}`} title={c.title}>
+          {c.text}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/** Compact AI telemetry chips — application-level data only (v0.5.0).
+ * Nothing renders when no provider is active: no real application
+ * telemetry means no clutter. TEST/FIXTURE mode is labeled explicitly. */
+export function AiTelemetryChips({
+  metrics,
+  providers,
+  fixture,
+}: {
+  metrics: AiMetrics | null
+  providers: Record<string, AiProviderState> | null
+  fixture: boolean
+}) {
+  const chips: { text: string; cls: string; title: string }[] = []
+  if (fixture) {
+    chips.push({
+      text: 'AI TELEMETRY TEST DATA',
+      cls: 'ai-tel-fixture',
+      title: 'TEST/FIXTURE/SYNTHETIC provider active — never real telemetry',
+    })
+  }
+  // provider state chip: only when an interface is actually present
+  const hermes = providers?.hermes
+  if (hermes && hermes.state !== 'UNAVAILABLE') {
+    const label =
+      hermes.state === 'ACTIVE' ? 'AI TELEMETRY ● ACTIVE'
+        : hermes.state === 'DEGRADED' ? 'AI TELEMETRY ● DEGRADED'
+          : 'AI TELEMETRY ● IDLE'
+    chips.push({
+      text: label,
+      cls: hermes.state === 'DEGRADED' ? 'ai-tel-degraded' : 'ai-tel-active',
+      title: hermes.detail,
+    })
+  }
+  if (metrics && metrics.runs > 0) {
+    chips.push({ text: `RUNS ${metrics.runs}`, cls: 'ai-tel-run', title: 'active agent runs' })
+  }
+  if (metrics && typeof metrics.tokens_per_s === 'number') {
+    chips.push({
+      text: `TOKENS/s ${metrics.tokens_per_s}`,
+      cls: 'ai-tel-tokens',
+      title: 'real token metrics (last 60 s)',
+    })
+  }
+  if (metrics && typeof metrics.tools === 'number') {
+    chips.push({ text: `TOOLS ${metrics.tools}`, cls: 'ai-tel-tools', title: 'tools observed in active runs' })
+  }
+  if (metrics?.model) {
+    chips.push({ text: `MODEL ${metrics.model}`, cls: 'ai-tel-model', title: 'model of the active run' })
+  }
+  if (chips.length === 0) return null
+  return (
+    <div className="ai-summary" title="Application-level AI telemetry — only real evidence">
       {chips.map((c, i) => (
         <span key={i} className={`ai-chip ${c.cls}`} title={c.title}>
           {c.text}
@@ -110,7 +183,7 @@ export function InfraSummaryChips({ infra }: { infra?: InfraSummary }) {
   )
 }
 
-export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
+export function Header({ status, mode, stats, feedTs, telemetry, aiMetrics, aiProviders, aiFixture }: Props) {
   const feed = feedTs
     ? new Date(feedTs * 1000).toLocaleTimeString('en-GB', { hour12: false })
     : '--:--:--'
@@ -130,6 +203,7 @@ export function Header({ status, mode, stats, feedTs, telemetry }: Props) {
       </div>
 
       <AiSummary semantic={stats?.semantic} />
+      <AiTelemetryChips metrics={aiMetrics ?? null} providers={aiProviders ?? null} fixture={aiFixture ?? false} />
       <InfraSummaryChips infra={stats?.infra} />
 
       <div className="header-right">

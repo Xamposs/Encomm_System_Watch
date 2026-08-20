@@ -12,7 +12,8 @@ import type { Filter, SemanticView, ViewMode } from './types/system'
 export default function App() {
   const {
     status, mode, ready, stats, feedTs, events,
-    selected, selectNode, drawerOpen, setDrawerOpen, telemetry, controllerRef,
+    selected, selectNode, drawerOpen, setDrawerOpen, telemetry,
+    aiMetrics, aiProviders, aiFixture, controllerRef,
   } = useSystemWatch()
   const [filter, setFilter] = useState<Filter>('all')
   const [search, setSearch] = useState('')
@@ -40,6 +41,9 @@ export default function App() {
         stats={stats}
         feedTs={feedTs}
         telemetry={telemetry}
+        aiMetrics={aiMetrics}
+        aiProviders={aiProviders}
+        aiFixture={aiFixture}
       />
 
       <FilterBar

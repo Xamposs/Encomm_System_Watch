@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
+  AiMetrics,
+  AiProviderState,
   ConnectionStatus,
   Stats,
   SystemEvent,
@@ -22,6 +24,10 @@ export function useSystemWatch() {
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [telemetry, setTelemetry] = useState<TelemetryInfo | null>(null)
+  // ---- application-level AI telemetry (v0.5.0) ---------------------------
+  const [aiMetrics, setAiMetrics] = useState<AiMetrics | null>(null)
+  const [aiProviders, setAiProviders] = useState<Record<string, AiProviderState> | null>(null)
+  const [aiFixture, setAiFixture] = useState(false)
   const eventsRef = useRef<SystemEvent[]>([])
   const controllerRef = useRef<GraphController | null>(null)
 
@@ -78,6 +84,19 @@ export function useSystemWatch() {
         case 'gpu':
           controllerRef.current?.applyGpu(msg.data)
           break
+        // ---- application-level AI telemetry (v0.5.0) -------------------
+        case 'ai_activity':
+          setAiFixture(msg.fixture)
+          controllerRef.current?.applyAiActivity(msg.events)
+          break
+        case 'ai_metrics':
+          setAiFixture(msg.fixture)
+          setAiMetrics(msg.metrics)
+          break
+        case 'ai_provider_status':
+          setAiFixture(msg.fixture)
+          setAiProviders(msg.providers)
+          break
       }
       perf.recordWs(msg.type, performance.now() - t0)
     }, setStatus)
@@ -113,6 +132,9 @@ export function useSystemWatch() {
     drawerOpen,
     setDrawerOpen,
     telemetry,
+    aiMetrics,
+    aiProviders,
+    aiFixture,
     controllerRef,
   }
 }

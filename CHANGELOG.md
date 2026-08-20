@@ -2,6 +2,103 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [0.5.0] — 2026-08-20
+
+REAL application-level AI telemetry checkpoint (Phase 17 FUNCTIONAL — real
+producer integration pending). SYSTEM WATCH now distinguishes OS/network
+telemetry from APPLICATION AI telemetry, with a normalized metadata
+pipeline, a real read-only Hermes gateway adapter, a bounded local
+ingestion endpoint, an OTEL seam and a TEST/FIXTURE provider that can
+never mix with real mode.
+
+### Evidence boundary (documented in README + ARCHITECTURE)
+
+- OS network telemetry != application AI telemetry
+- process relationship != tool call
+- network bytes != tokens
+- socket throughput != TPS
+
+### Added — normalized AI telemetry (`backend/app/ai_telemetry/`)
+
+- `models.py` — `AITelemetryEvent` normalized schema (event_id, source,
+  event_type, agent/model/tool ids, trace/span ids, status, duration,
+  token counts, TPS — every metric optional, `None` when the source does
+  not provide it; TPS is derived ONLY from real token + duration
+  evidence). Privacy gate `contains_private_content`: prompt/response/
+  reasoning/content/credential-shaped keys and values are rejected.
+- `base.py` — failure-isolated `TelemetryProvider` with the four
+  truthful states: ACTIVE / AVAILABLE_NO_DATA / UNAVAILABLE / DEGRADED
+  and a per-metric availability matrix.
+- `buffer.py` — bounded: 500 event history, 20 active traces, 100 recent
+  spans, 600 s run TTL; trace correlation via real `trace_id` /
+  `parent_span_id` (no invented parentage); tokens/s only from real
+  non-fixture token events.
+- `hermes_provider.py` — REAL read-only adapter. Discovers
+  `hermes_cli.main … serve` gateway processes + their localhost
+  listeners (real socket evidence) and polls the unauthenticated
+  `GET /api/health` + `GET /api/status` endpoints. Emits
+  `AGENT_RUN_STARTED/FINISHED` from real `active_agents` count deltas
+  (run identity FIFO-inferred — the gateway exposes counts only; the
+  metadata always records count_before/count_after), `AI_ERROR` on
+  platform/component error states (change-only). Verified LIVE on this
+  machine: 2 real gateways discovered (default + encomm-system-watch),
+  provider ACTIVE, 1 real session observed.
+- `otel_provider.py` — lightweight OpenTelemetry-compatible seam
+  (gen_ai.* / agent.* / tool.* attribute subset → normalized events).
+  Status: **READY / NO REAL PRODUCER** (unit-tested; no producer wired).
+- `fixture_provider.py` — TEST-ONLY deterministic scripted lifecycle
+  (run → model request → tool call → MCP call → run finish), env-gated
+  (`ESW_AI_TELEMETRY_FIXTURE=1`), every event `test_only`, registry
+  reports `fixture_mode: true`; never active in real mode.
+- `registry.py` — async poll loop (5 s), per-provider failure isolation,
+  WS publishing on change only.
+
+### Added — localhost ingestion + API + WebSocket (metadata only)
+
+- `POST /api/ai-telemetry/events` — OPTIONAL local ingestion for
+  explicit trusted instrumentation. Localhost-only, 64 KB bound,
+  schema-whitelisted (unknown fields rejected), metadata ≤ 32 bounded
+  keys, private content rejected. **OBSERVE ONLY**: no tool/agent/model/
+  MCP/shell/execution control paths (security-tested). All security
+  tests in `backend/tests/test_ai_telemetry_security.py`.
+- `GET /api/ai-telemetry` — provider states, active runs, metrics,
+  bounded caps, fixture mode.
+- WS message types `ai_activity` / `ai_metrics` / `ai_provider_status`
+  — change/activity only, never full histories; suppressed during
+  TEST-ONLY benchmark mode so synthetic and real data can never mix.
+
+### Added — frontend
+
+- Bounded transient AI runtime nodes (AGENT RUN / MODEL REQUEST /
+  TOOL CALL / MCP CALL, hexagon, role-colored; TEST/FIXTURE dashed +
+  `[TEST]` label; hard cap 24 nodes, TTL decay via the shared 1 s
+  timer). Edges (`AI_CALL`) only on proven evidence: backend trace
+  parentage, `sem:hermes` agent identity, exact LOCAL_LLM `model_id`
+  match. Runtime nodes survive snapshot refreshes.
+- Distinct AI signal lane in the canvas overlay: fuchsia diamonds
+  (rose for TEST) — never the DATA particle lane; own budgets
+  (24 particles / 60 signal edges), 1.5 s decay, idle-stops.
+- Inspector: AI TELEMETRY section (role/status/model/tokens/TPS/
+  latency/tools/trace — only real fields).
+- Event drawer rows: AI RUN START/END, MODEL REQUEST, TOOL CALL,
+  MCP CALL, AI ERROR, AI RETRY (TEST-labeled).
+- Header: compact AI telemetry chips only when real data exists
+  (provider state, RUNS, TOKENS/s, TOOLS, MODEL).
+
+### Validation
+
+- Backend: 262 tests passed / 0 failed (225 baseline + 37 new).
+- Frontend: typecheck + production build PASS.
+- Acceptance: 170 baseline + 30 new AC checks (AC0–AC29) covering
+  provider state, bounded ingestion, invalid/private/oversized payload
+  rejection, trace correlation, runtime node lifecycle + TEST labeling,
+  drawer rows, snapshot survival, deterministic cleanup, AI signal
+  budgets, env-gated fixture backend with return to real mode.
+- REAL: Hermes semantic YES; deep telemetry interface found (gateway
+  status API — status/counts only); tokens/TPS/tool names
+  **UNAVAILABLE** (401-protected / not exposed without auth) — reported
+  truthfully, never estimated.
+
 ## [0.4.0] — 2026-08-20
 
 Infrastructure observability checkpoint (Phases 08 + 09 COMPLETE, Phase 21

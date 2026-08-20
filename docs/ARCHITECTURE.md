@@ -31,6 +31,10 @@ INFRA ENGINE (v0.4.0)     (svc/wsl/docker/vm nodes + HOSTED_BY/HOSTS/EXPOSES/
    ▼                      CONNECTED_TO/BACKED_BY edges + change-only events)
 SEMANTIC ENGINE           (evidence + confidence -> semantic resource nodes
    ▼                      -> relationships -> change-only events)
+AI TELEMETRY (v0.5.0)     (REAL application-level metadata only:
+   ▼                      Hermes gateway status API + OTEL seam +
+                          optional local ingestion -> normalized events ->
+                          bounded buffer -> WS ai_activity/metrics/status)
 DIFF / EVENT ENGINE
    ▼
 FASTAPI + WEBSOCKET  (127.0.0.1:8765)
@@ -644,3 +648,79 @@ node stay; unrelated noise dims. Header chips (`SERVICES n`, `WSL n`,
 `CONTAINERS n`, `VM n`, `DOCKER STOPPED`) render only detected categories;
 the inspector gains read-only WINDOWS SERVICE / WSL DISTRIBUTION / DOCKER
 ENGINE / CONTAINER / DOCKER NETWORK / VIRTUAL MACHINE sections.
+
+## 12. Application-level AI telemetry (v0.5.0)
+
+The hard rule: **OS/network telemetry is NEVER converted into AI claims.**
+A TCP connection is not a tool call, network bytes are not tokens, socket
+throughput is not TPS, a child process is not an agent message. Normalized
+AI events exist only when an application-level source proves them; every
+metric stays `null` when no source provides it.
+
+```
+HERMES GATEWAY (real)          LOCAL INSTRUMENTATION (optional)   OTEL (seam)
+hermes_cli.main serve ─┐       POST /api/ai-telemetry/events      gen_ai.* spans
+127.0.0.1:<dyn> status ┘       (localhost-only, 64 KB, schema-    (README: NO REAL
+GET /api/status + /health      whitelist, private content → 422)  PRODUCER yet)
+        │                              │                              │
+        ▼                              ▼                              ▼
+PROVIDERS (failure-isolated: hermes-gateway-status / otel-seam / fixture)
+        ▼
+NORMALIZED EVENTS (AITelemetryEvent — agent/model/tool/trace/status/
+                   duration/tokens/TPS; absent fields stay absent)
+        ▼
+BOUNDED BUFFER (500 history · 20 active traces · 100 spans · 600 s TTL)
+        ▼
+WS ai_activity · ai_metrics · ai_provider_status   (change-only, bounded)
+        ▼
+FRONTEND: transient AI_RUNTIME nodes (cap 24, TTL-decayed) + AI_CALL edges
+          ONLY on proven parentage (trace ids, sem:hermes identity, exact
+          LOCAL_LLM model_id) + distinct fuchsia AI signal diamonds
+          (24 particles / 60 edges budgets — never the DATA particle lane)
+```
+
+### 12.1 Providers
+
+| Provider | Source | State on this machine | Availability |
+|---|---|---|---|
+| `hermes` | gateway `/api/status` + `/api/health` (unauthenticated, localhost, dynamic port discovered from real process+listener evidence) | **ACTIVE** (2 real gateways) | runs ✓ sessions ✓ · tokens/TPS/tool names/MCP/traces ✗ (401-protected / not exposed) |
+| `otel` | OTEL-shaped span normalization (`gen_ai.*` / `agent.*` / `tool.*`) | **AVAILABLE_NO_DATA** — READY / NO REAL PRODUCER | none until wired |
+| `fixture` | deterministic scripted lifecycle; `ESW_AI_TELEMETRY_FIXTURE=1` only | never active in real mode | every event `test_only` |
+
+Run lifecycle from the Hermes provider is count-delta evidence: the gateway
+exposes `active_agents` as a COUNT, so run identity is FIFO-inferred per
+gateway and every event records `count_before`/`count_after` — the counts
+are real, the identity inference is documented, never hidden.
+
+### 12.2 Ingestion — metadata sink, not a control surface
+
+`POST /api/ai-telemetry/events` accepts ONE normalized event per request
+for explicit trusted local instrumentation. Bounds: 64 KB body, pydantic
+schema with `extra="forbid"` (no arbitrary JSON), metadata ≤ 32 keys with
+bounded values, event-type whitelist, and a recursive privacy gate that
+rejects prompt/response/reasoning/content keys and credential-shaped
+values. The route has no execution, tool, model, MCP, service or shell
+paths — proven by `tests/test_ai_telemetry_security.py`.
+
+### 12.3 Evidence boundaries (never crossed)
+
+- **process relationship ≠ tool call** — MCP/TOOL events require explicit
+  application-level proof; a TCP connection to an MCP server or a child MCP
+  process only produces the existing process/network relationships.
+- **network bytes ≠ tokens** — token counts come only from sources that
+  report them; TPS is derived only from real tokens + real duration.
+- **socket throughput ≠ TPS** — never estimated from byte rates.
+- **no private content** — prompts, responses, reasoning, tool arguments
+  with user data, file contents and credentials are never ingested;
+  `GET /api/ai-telemetry` returns metadata only.
+- **no control surface** — ingestion cannot execute tools, launch agents,
+  call models, send MCP commands, control services or run shell commands.
+- **fixture data never mixes with real mode** — the fixture provider is
+  env-gated, every event is `test_only` and labeled TEST/FIXTURE/SYNTHETIC
+  (frontend: dashed rose styling + `[TEST]`); the registry reports
+  `fixture_mode: true` while active.
+- **bounded animation** — AI signals have their own budgets (24 particles,
+  60 edges, 1.5 s decay) independent of the Phase-20 DATA particle budget;
+  runtime nodes are capped (24) and TTL-decayed by the shared 1 s timer.
+- **benchmark isolation** — AI telemetry WS messages are suppressed while
+  the TEST-ONLY benchmark fixture is active.

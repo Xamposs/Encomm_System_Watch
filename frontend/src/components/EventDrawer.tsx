@@ -38,6 +38,18 @@ const TYPE_LABEL: Record<EventType, string> = {
   VM_DETECTED: 'VM DETECTED',
   VM_LOST: 'VM LOST',
   VM_STATE_CHANGED: 'VM STATE',
+  // ---- application-level AI telemetry (v0.5.0) ----
+  AGENT_RUN_STARTED: 'AI RUN START',
+  AGENT_RUN_FINISHED: 'AI RUN END',
+  MODEL_REQUEST_STARTED: 'MODEL REQUEST',
+  MODEL_REQUEST_FINISHED: 'MODEL REQUEST',
+  TOOL_CALL_STARTED: 'TOOL CALL',
+  TOOL_CALL_FINISHED: 'TOOL CALL',
+  MCP_CALL_STARTED: 'MCP CALL',
+  MCP_CALL_FINISHED: 'MCP CALL',
+  AGENT_MESSAGE: 'AGENT MESSAGE',
+  RETRY: 'AI RETRY',
+  AI_ERROR: 'AI ERROR',
 }
 
 const TYPE_CLASS: Record<EventType, string> = {
@@ -70,6 +82,18 @@ const TYPE_CLASS: Record<EventType, string> = {
   VM_DETECTED: 'ev-vm',
   VM_LOST: 'ev-vm',
   VM_STATE_CHANGED: 'ev-vm',
+  // ---- application-level AI telemetry (v0.5.0) ----
+  AGENT_RUN_STARTED: 'ev-ai',
+  AGENT_RUN_FINISHED: 'ev-ai',
+  MODEL_REQUEST_STARTED: 'ev-ai-model',
+  MODEL_REQUEST_FINISHED: 'ev-ai-model',
+  TOOL_CALL_STARTED: 'ev-ai-tool',
+  TOOL_CALL_FINISHED: 'ev-ai-tool',
+  MCP_CALL_STARTED: 'ev-ai-tool',
+  MCP_CALL_FINISHED: 'ev-ai-tool',
+  AGENT_MESSAGE: 'ev-ai',
+  RETRY: 'ev-ai',
+  AI_ERROR: 'ev-ai-error',
 }
 
 /**
@@ -127,6 +151,32 @@ function describe(ev: SystemEvent): string {
     case 'VM_LOST':
     case 'VM_STATE_CHANGED':
       return `${m.name ?? 'VIRTUALIZATION PROCESS'} · ${m.provider ?? '?'} → ${String(m.state ?? '?')}`
+    // ---- application-level AI telemetry (v0.5.0) ----
+    // metadata is the compact row emitted by the ai registry — no content
+    case 'AGENT_RUN_STARTED':
+    case 'AGENT_RUN_FINISHED':
+      return `${m.agent_name ?? m.agent_id ?? '?'}${m.status ? ` → ${String(m.status).toUpperCase()}` : ''}${m.test_only ? ' · TEST' : ''}`
+    case 'MODEL_REQUEST_STARTED':
+    case 'MODEL_REQUEST_FINISHED': {
+      const parts = [m.model_id ?? '?']
+      if (typeof m.duration_ms === 'number') parts.push(`${Math.round(m.duration_ms)} ms`)
+      if (typeof m.total_tokens === 'number') parts.push(`${m.total_tokens} tok`)
+      if (typeof m.tps === 'number') parts.push(`${m.tps} tok/s`)
+      parts.push(m.status ?? '?')
+      return `${parts.join(' · ')}${m.test_only ? ' · TEST' : ''}`
+    }
+    case 'TOOL_CALL_STARTED':
+    case 'TOOL_CALL_FINISHED':
+      return `${m.tool_name ?? '?'}${typeof m.duration_ms === 'number' ? ` · ${Math.round(m.duration_ms)} ms` : ''}${m.status ? ` → ${String(m.status).toUpperCase()}` : ''}${m.test_only ? ' · TEST' : ''}`
+    case 'MCP_CALL_STARTED':
+    case 'MCP_CALL_FINISHED':
+      return `MCP ${m.tool_name ?? '?'}${typeof m.duration_ms === 'number' ? ` · ${Math.round(m.duration_ms)} ms` : ''}${m.status ? ` → ${String(m.status).toUpperCase()}` : ''}${m.test_only ? ' · TEST' : ''}`
+    case 'AGENT_MESSAGE':
+      return `${m.agent_name ?? m.agent_id ?? '?'}${m.test_only ? ' · TEST' : ''}`
+    case 'RETRY':
+      return `${m.agent_name ?? m.agent_id ?? '?'} retry${m.test_only ? ' · TEST' : ''}`
+    case 'AI_ERROR':
+      return `${m.agent_name ?? m.agent_id ?? '?'} · ${m.status ?? 'error'}${m.test_only ? ' · TEST' : ''}`
   }
 }
 

@@ -29,6 +29,23 @@ interface EdgeActivity {
   synthetic?: boolean // TEST-ONLY injected activity (benchmark mode)
 }
 
+/** One application-level AI signal on an edge (proven telemetry only). */
+interface AiSignal {
+  lastActivity: number // performance.now() of the last AI event on this edge
+  lastSpawn: number
+  testOnly?: boolean // TEST/FIXTURE/SYNTHETIC signal — visually distinct
+}
+
+/** Diamond-shaped particle for AI application signals (not bytes). */
+interface AiParticle {
+  edgeId: string
+  t: number
+  dur: number
+  size: number
+  born: number
+  testOnly: boolean
+}
+
 const PULSE_COLORS: Record<PulseKind, string> = {
   open: '#35e0ff',
   close: '#ff5d5d',
@@ -39,10 +56,23 @@ const PULSE_COLORS: Record<PulseKind, string> = {
 const FWD_COLOR = '#35e0ff'
 const REV_COLOR = '#ffb35c'
 
+// AI application signals: fuchsia diamonds — visually distinct from both
+// DATA particles and lifecycle pulses (semantic AI signal != network bytes)
+const AI_SIGNAL_COLOR = '#f0abfc'
+const AI_SIGNAL_TEST_COLOR = '#fda4af'
+
 const MAX_PULSES = 30
 const MAX_RECENT = 80
 const MAX_PARTICLES = 140
 const MAX_ACTIVITY_EDGES = 400
+
+// AI signal budgets (Phase 17 bounded animation): independent of the DATA
+// particle budget so AI activity can neither starve nor exceed it.
+const MAX_AI_PARTICLES = 24
+const MAX_AI_SIGNAL_EDGES = 60
+const AI_SIGNAL_MS = 1500      // decay window: no continuous animation
+const AI_SPAWN_INTERVAL_MS = 650
+const AI_PER_EDGE_CAP = 2
 
 // per-edge particle ceiling scales with activity level: a low edge may keep
 // 2 particles, a high edge up to 6 — the global MAX_PARTICLES budget is
@@ -80,6 +110,13 @@ export class EdgePulseOverlay {
   private recent = new Map<string, number>()
   private activity = new Map<string, EdgeActivity>()
   private particles: DataParticle[] = []
+  // ---- application-level AI signals (v0.5.0) --------------------------
+  // Distinct lane from DATA particles: AI signals are proven application
+  // telemetry relationships (agent run -> model request -> tool call),
+  // never ETW byte evidence. Same decay-by-time contract, own bounded
+  // budget so AI activity can never starve or exceed the Phase 20 caps.
+  private aiSignals = new Map<string, AiSignal>()
+  private aiParticles: AiParticle[] = []
   private running = false
   private raf = 0
   private stops = 0
@@ -179,6 +216,52 @@ export class EdgePulseOverlay {
     if (items.length > 0) this.ensureRunning()
   }
 
+  // ------------------------------------------------- AI application signals
+  // Feed one AI activity batch (proven application-level telemetry from the
+  // ai_activity WS message). testOnly signals (TEST/FIXTURE/SYNTHETIC) get a
+  // distinct color so fixture data can never be mistaken for real AI work.
+  applyAiSignals(items: { edge_id: string; test_only?: boolean }[]): void {
+    if (this.testMuted) return
+    const now = performance.now()
+    const touched = new Set<string>()
+    for (const it of items) {
+      touched.add(it.edge_id)
+      const prev = this.aiSignals.get(it.edge_id)
+      this.aiSignals.set(it.edge_id, {
+        lastActivity: now,
+        lastSpawn: prev?.lastSpawn ?? 0,
+        testOnly: Boolean(it.test_only),
+      })
+    }
+    for (const [eid, st] of this.aiSignals) {
+      if (touched.has(eid)) continue
+      if (now - st.lastActivity > AI_SIGNAL_MS) this.aiSignals.delete(eid)
+    }
+    if (this.aiSignals.size > MAX_AI_SIGNAL_EDGES) {
+      const sorted = [...this.aiSignals.entries()].sort(
+        (a, b) => b[1].lastActivity - a[1].lastActivity,
+      )
+      this.aiSignals = new Map(sorted.slice(0, MAX_AI_SIGNAL_EDGES))
+    }
+    if (items.length > 0) this.ensureRunning()
+  }
+
+  private spawnAiParticle(edgeId: string, st: AiSignal): void {
+    const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
+    if (edge.length === 0 || edge.removed()) return
+    const own = this.aiParticles.filter((p) => p.edgeId === edgeId)
+    if (own.length >= AI_PER_EDGE_CAP) return
+    if (this.aiParticles.length >= MAX_AI_PARTICLES) return
+    this.aiParticles.push({
+      edgeId,
+      t: 0,
+      dur: 700 + Math.random() * 300,
+      size: 2.0,
+      born: performance.now(),
+      testOnly: Boolean(st.testOnly),
+    })
+  }
+
   private spawnParticle(edgeId: string, st: EdgeActivity): void {
     const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
     if (edge.length === 0 || edge.removed()) return
@@ -268,10 +351,32 @@ export class EdgePulseOverlay {
     }
     this.particles = alive
 
+    // --- AI application signals: spawn + advance (bounded lane) ----------
+    for (const [edgeId, st] of this.aiSignals) {
+      if (now - st.lastActivity > AI_SIGNAL_MS) {
+        this.aiSignals.delete(edgeId)
+        continue
+      }
+      if (now - st.lastSpawn >= AI_SPAWN_INTERVAL_MS) {
+        st.lastSpawn = now
+        this.spawnAiParticle(edgeId, st)
+        if (this.aiParticles.length >= MAX_AI_PARTICLES) break
+      }
+    }
+    const aiAlive: AiParticle[] = []
+    for (const p of this.aiParticles) {
+      const edge = this.cy.getElementById(p.edgeId) as unknown as EdgeSingular
+      if (edge.length === 0 || edge.removed()) continue
+      p.t = Math.min(1, (now - p.born) / p.dur)
+      if (p.t < 1) aiAlive.push(p)
+    }
+    this.aiParticles = aiAlive
+
     const hasData = this.activity.size > 0
     const hasRecent = this.recent.size > 0
     const hasPulses = this.pulses.size > 0
-    if (!hasData && !hasRecent && !hasPulses && this.particles.length === 0) {
+    const hasAi = this.aiSignals.size > 0 || this.aiParticles.length > 0
+    if (!hasData && !hasRecent && !hasPulses && !hasAi && this.particles.length === 0) {
       cancelAnimationFrame(this.raf)
       this.running = false
       this.stops += 1
@@ -343,6 +448,45 @@ export class EdgePulseOverlay {
       ctx.globalAlpha = 1
     }
 
+    // --- AI application signal diamonds (proven telemetry, not bytes) ----
+    for (const p of this.aiParticles) {
+      const edge = this.cy.getElementById(p.edgeId) as unknown as EdgeSingular
+      if (edge.length === 0 || edge.removed()) continue
+      const pt = this.pointOn(edge, p.t)
+      if (!pt) continue
+      const head = this.toRender(pt)
+      const color = p.testOnly ? AI_SIGNAL_TEST_COLOR : AI_SIGNAL_COLOR
+      ctx.save()
+      ctx.shadowColor = color
+      ctx.shadowBlur = 10 * zoom
+      ctx.translate(head.x, head.y)
+      ctx.rotate(Math.PI / 4)
+      const s = p.size * zoom
+      ctx.beginPath()
+      ctx.rect(-s, -s, s * 2, s * 2)
+      ctx.fillStyle = color
+      ctx.fill()
+      ctx.restore()
+      for (let i = 1; i <= 3; i++) {
+        const tt = p.t - i * 0.05
+        if (tt < 0) break
+        const pt2 = this.pointOn(edge, tt)
+        if (!pt2) break
+        const p2 = this.toRender(pt2)
+        ctx.save()
+        ctx.translate(p2.x, p2.y)
+        ctx.rotate(Math.PI / 4)
+        const ss = s * 0.6 * (1 - i / 6)
+        ctx.beginPath()
+        ctx.rect(-ss, -ss, ss * 2, ss * 2)
+        ctx.fillStyle = color
+        ctx.globalAlpha = 0.3 * (1 - i / 4)
+        ctx.fill()
+        ctx.restore()
+      }
+      ctx.globalAlpha = 1
+    }
+
     // --- lifecycle pulses (open/close/update events) ---------------------
     for (const [edgeId, pulse] of this.pulses) {
       const t = (now - pulse.start) / pulse.dur
@@ -402,6 +546,8 @@ export class EdgePulseOverlay {
     this.particles = []
     this.pulses.clear()
     this.recent.clear()
+    this.aiSignals.clear()
+    this.aiParticles = []
   }
 
   /**
@@ -419,13 +565,15 @@ export class EdgePulseOverlay {
     this.particles = []
     this.pulses.clear()
     this.recent.clear()
+    this.aiSignals.clear()
+    this.aiParticles = []
   }
 
   /**
    * Read-only diagnostics for acceptance tests / debugging: current
    * run-state of the overlay (never exposes packet data).
    */
-  stats(): { running: boolean; activity: number; particles: number; pulses: number; recent: number; stops: number; synthetic: number; budget: { maxParticles: number; activityEdges: number; perEdgeCaps: Record<number, number> } } {
+  stats(): { running: boolean; activity: number; particles: number; pulses: number; recent: number; stops: number; synthetic: number; aiSignals: number; aiParticles: number; budget: { maxParticles: number; activityEdges: number; perEdgeCaps: Record<number, number>; maxAiParticles: number; aiSignalEdges: number } } {
     let synthetic = 0
     for (const st of this.activity.values()) {
       if (st.synthetic) synthetic += 1
@@ -438,10 +586,14 @@ export class EdgePulseOverlay {
       recent: this.recent.size,
       stops: this.stops,
       synthetic,
+      aiSignals: this.aiSignals.size,
+      aiParticles: this.aiParticles.length,
       budget: {
         maxParticles: MAX_PARTICLES,
         activityEdges: MAX_ACTIVITY_EDGES,
         perEdgeCaps: { ...PER_EDGE_CAP },
+        maxAiParticles: MAX_AI_PARTICLES,
+        aiSignalEdges: MAX_AI_SIGNAL_EDGES,
       },
     }
   }

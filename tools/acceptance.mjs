@@ -1316,6 +1316,181 @@ async function main() {
   const testOnlyAB = await cdp.eval(EX.testOnlyNodes)
   check('AB29 zero synthetic nodes (no benchmark leftovers)', testOnlyAB === 0, `testOnly=${testOnlyAB}`)
 
+  // ---- Test AC: AI TELEMETRY (v0.5.0) -------------------------------------
+  // REAL application-level AI telemetry: Hermes gateway status API (real,
+  // read-only, localhost), generic local ingestion (bounded + private-
+  // content rejection), OTEL seam (READY / NO REAL PRODUCER), env-gated
+  // TEST/FIXTURE provider (never mixes with real mode), bounded runtime
+  // nodes + distinct AI signals. Nothing here is ever fabricated.
+  console.log('\n[Test AC] AI telemetry (v0.5.0)')
+  const aiTel = await (await fetch(`${API}/api/ai-telemetry`)).json()
+  check('AC0 /api/ai-telemetry serializes state', !!aiTel && 'providers' in aiTel && 'caps' in aiTel,
+    'schema present')
+  check('AC1 real mode: fixture_mode false', aiTel.fixture_mode === false, `fixture=${aiTel.fixture_mode}`)
+  const hermesProv = aiTel?.providers?.hermes
+  check('AC2 hermes provider present', !!hermesProv, hermesProv?.state ?? 'absent')
+  check('AC3 hermes provider REAL state', hermesProv && ['ACTIVE', 'AVAILABLE_NO_DATA', 'DEGRADED'].includes(hermesProv.state),
+    hermesProv?.state ?? '')
+  const avail = hermesProv?.availability ?? {}
+  check('AC4 runs/sessions availability REAL', avail.runs === true && avail.sessions === true,
+    `runs=${avail.runs} sessions=${avail.sessions}`)
+  // truthfulness: deep per-request telemetry is NOT exposed by the gateway
+  // without auth — these must report false, never invented numbers
+  check('AC5 deep telemetry truthfully UNAVAILABLE',
+    avail.tokens === false && avail.tps === false && avail.tool_calls === false &&
+    avail.model_requests === false && avail.mcp_calls === false && avail.traces === false,
+    `tokens=${avail.tokens} tps=${avail.tps} tools=${avail.tool_calls} mcp=${avail.mcp_calls}`)
+  const otelProv = aiTel?.providers?.otel
+  check('AC6 OTEL seam READY / NO REAL PRODUCER', otelProv && otelProv.state === 'AVAILABLE_NO_DATA' &&
+    /NO REAL PRODUCER/i.test(otelProv.detail), otelProv?.state ?? 'absent')
+  check('AC7 bounded caps declared', aiTel.caps?.event_history === 500 && aiTel.caps?.active_traces === 20,
+    JSON.stringify(aiTel.caps))
+
+  // ---- local ingestion: valid metadata accepted --------------------------
+  const ingestOk = await (await fetch(`${API}/api/ai-telemetry/events`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      source: 'acceptance', event_type: 'AGENT_RUN_STARTED',
+      agent_id: 'acceptance-run-1', agent_name: 'ACCEPTANCE (TEST)',
+      trace_id: 'acceptance-trace-1', test_only: true,
+    }),
+  })).json()
+  check('AC8 valid ingestion accepted', ingestOk.accepted === 1 && ingestOk.test_only === true,
+    JSON.stringify(ingestOk))
+  const aiTel2 = await (await fetch(`${API}/api/ai-telemetry`)).json()
+  const runFound = (aiTel2?.active_runs ?? []).some((r) => r.trace_id === 'acceptance-trace-1')
+  check('AC9 ingested run correlated into active traces', runFound === true,
+    `runs=${(aiTel2?.active_runs ?? []).length}`)
+
+  // ---- ingestion: schema + privacy + size rejection ----------------------
+  const badField = await fetch(`${API}/api/ai-telemetry/events`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'acceptance', event_type: 'AGENT_RUN_STARTED', prompt_text: 'x' }),
+  })
+  check('AC10 unknown top-level field rejected', badField.status === 422, `status=${badField.status}`)
+  const badType = await fetch(`${API}/api/ai-telemetry/events`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'acceptance', event_type: 'NOT_A_TYPE' }),
+  })
+  check('AC11 unsupported event_type rejected', badType.status === 422, `status=${badType.status}`)
+  const privPrompt = await fetch(`${API}/api/ai-telemetry/events`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'acceptance', event_type: 'AI_ERROR', metadata: { prompt: 'secret' } }),
+  })
+  const privPromptBody = await privPrompt.json()
+  check('AC12 prompt content rejected', privPrompt.status === 422 && /private content/i.test(privPromptBody.error ?? ''),
+    `status=${privPrompt.status}`)
+  const privBearer = await fetch(`${API}/api/ai-telemetry/events`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'acceptance', event_type: 'AI_ERROR', metadata: { note: 'Bearer abcdef123456' } }),
+  })
+  check('AC13 credential-shaped value rejected', privBearer.status === 422, `status=${privBearer.status}`)
+  const huge = await fetch(`${API}/api/ai-telemetry/events`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'acceptance', event_type: 'AGENT_RUN_STARTED', metadata: { pad: 'A'.repeat(70_000) } }),
+  })
+  check('AC14 oversized payload rejected', huge.status === 413, `status=${huge.status}`)
+
+  // ---- runtime node + drawer row (test-only, labeled) ---------------------
+  await cdp.send('Page.reload')
+  await sleep(9000)
+  const acLive = await cdp.eval(EX.connLabel)
+  check('AC15 reconnected LIVE', acLive === '● LIVE', acLive)
+  // drive one TEST-ONLY model-request event through the real ingestion
+  // endpoint so the frontend shows the bounded runtime node + AI signal
+  await fetch(`${API}/api/ai-telemetry/events`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      source: 'acceptance', event_type: 'MODEL_REQUEST_FINISHED',
+      agent_id: 'acceptance-run-1', trace_id: 'acceptance-trace-2',
+      span_id: 'acceptance-span-1', model_id: 'acceptance-model',
+      status: 'ok', duration_ms: 850, input_tokens: 120, output_tokens: 80, test_only: true,
+    }),
+  })
+  let aiRt = { runtimeNodes: 0, runtimeEdges: 0 }
+  for (let i = 0; i < 10; i++) {
+    aiRt = await cdp.eval(`window.__esw_controller ? window.__esw_controller.aiStats() : { runtimeNodes: 0, runtimeEdges: 0, overlayAiSignals: 0, overlayAiParticles: 0 }`)
+    if (aiRt.runtimeNodes >= 1) break
+    await sleep(700)
+  }
+  check('AC16 runtime node created from ingestion', aiRt.runtimeNodes >= 1,
+    `nodes=${aiRt.runtimeNodes}`)
+  const testNode = await cdp.eval(`(() => { const n = window.__esw_cy?.nodes('[kind="AI_RUNTIME"]')[0]; return n ? { role: n.data('ai_role'), test: n.data('ai_test_only') } : null })()`)
+  check('AC17 runtime node labeled TEST/FIXTURE', testNode && testNode.test === true && testNode.role === 'MODEL_REQUEST',
+    JSON.stringify(testNode))
+  const aiDrawerRows = await cdp.eval(`[...document.querySelectorAll('.ev-type')].filter(e => /MODEL REQUEST|AI RUN|TOOL CALL|MCP CALL/.test(e.textContent)).length`)
+  check('AC18 AI event rows in drawer', aiDrawerRows >= 1, `rows=${aiDrawerRows}`)
+  // runtime nodes survive the 1 s snapshot refresh (graph-instance preservation)
+  await sleep(3500)
+  const aiRt2 = await cdp.eval(`window.__esw_controller ? window.__esw_controller.aiStats() : { runtimeNodes: 0 }`)
+  check('AC19 runtime node survives snapshot refresh', aiRt2.runtimeNodes >= 1,
+    `nodes=${aiRt2.runtimeNodes}`)
+  // deterministic cleanup (acceptance hook)
+  await cdp.eval(`window.__esw_controller?.testClearAiRuntime() ?? false`)
+  const aiRt3 = await cdp.eval(`window.__esw_controller ? window.__esw_controller.aiStats() : { runtimeNodes: -1 }`)
+  check('AC20 runtime node cleanup deterministic', aiRt3.runtimeNodes === 0,
+    `nodes=${aiRt3.runtimeNodes}`)
+  // AI signal budgets are bounded and distinct from DATA particle budgets
+  const overlayStats = await cdp.eval(`window.__esw_controller ? window.__esw_controller.overlayStats() : null`)
+  check('AC21 AI signal lane bounded budgets', !!overlayStats && overlayStats.budget.maxAiParticles === 24 &&
+    overlayStats.budget.aiSignalEdges === 60,
+    overlayStats ? `aiParticles=${overlayStats.budget.maxAiParticles}` : 'no overlay')
+  check('AC22 AI signals distinct from DATA particles', !!overlayStats && 'aiSignals' in overlayStats,
+    'aiSignals counter present')
+
+  // ---- TEST/FIXTURE provider: env-gated, never mixes with real mode ------
+  // spawn a second backend on :8766 with ESW_AI_TELEMETRY_FIXTURE=1 (and
+  // ETW off so the real session is untouched); assert fixture labels; kill
+  // it; assert the real backend returns to fixture_mode:false.
+  const backendDir = join(__dirname, '..', 'backend')
+  const py = join(backendDir, '.venv', 'Scripts', 'python.exe')
+  const fixtureProc = spawn(py, ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8766'], {
+    cwd: backendDir,
+    env: { ...process.env, ESW_AI_TELEMETRY_FIXTURE: '1', ESW_TELEMETRY_PROVIDER: 'off', ESW_GPU_ENABLED: '0' },
+    stdio: 'ignore',
+  })
+  let fixtureReady = false
+  for (let i = 0; i < 40; i++) {
+    try {
+      const h = await (await fetch('http://127.0.0.1:8766/api/health')).json()
+      if (h.status === 'ok') { fixtureReady = true; break }
+    } catch { /* booting */ }
+    await sleep(500)
+  }
+  check('AC23 fixture backend boots', fixtureReady === true, fixtureReady ? 'ok' : 'timeout')
+  let fixtureTel = {}
+  if (fixtureReady) {
+    fixtureTel = await (await fetch('http://127.0.0.1:8766/api/ai-telemetry')).json()
+    check('AC24 fixture mode flagged', fixtureTel.fixture_mode === true, `fixture=${fixtureTel.fixture_mode}`)
+    check('AC25 fixture provider present + ACTIVE', fixtureTel?.providers?.fixture?.state === 'ACTIVE',
+      fixtureTel?.providers?.fixture?.state ?? 'absent')
+    check('AC26 fixture provider labeled TEST', fixtureTel?.providers?.fixture?.test_only === true,
+      'test_only flag')
+    // deterministic scripted lifecycle flows within ~5 registry polls (5 s each)
+    let hist = 0
+    for (let i = 0; i < 30; i++) {
+      const t = await (await fetch('http://127.0.0.1:8766/api/ai-telemetry')).json()
+      hist = t?.history_count ?? 0
+      if (hist >= 4) break
+      await sleep(1000)
+    }
+    check('AC27 fixture events flow (lifecycle)', hist >= 4, `history=${hist}`)
+  }
+  fixtureProc.kill()
+  await sleep(800)
+  const realAgain = await (await fetch(`${API}/api/ai-telemetry`)).json()
+  check('AC28 return to real mode after fixture', realAgain.fixture_mode === false &&
+    !realAgain?.providers?.fixture, `fixture=${realAgain.fixture_mode}`)
+  check('AC29 real hermes provider untouched', !!realAgain?.providers?.hermes,
+    realAgain?.providers?.hermes?.state ?? 'absent')
+
+  // ---- REAL validation summary (truthful counts) -------------------------
+  const realEvents = (await (await fetch(`${API}/api/ai-telemetry`)).json())
+  const realRuns = (realEvents?.active_runs ?? []).filter((r) => !r.test_only).length
+  console.log(`  real  Hermes semantic: YES (gateway status API) · deep interface: STATUS-ONLY (tokens/TPS UNAVAILABLE)`)
+  console.log(`  real  AI events observed: ${realEvents?.history_count ?? 0} (incl. acceptance TEST rows) · real runs: ${realRuns}`)
+
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact
   await cdp.send('Emulation.setDeviceMetricsOverride', {
