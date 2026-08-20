@@ -1633,8 +1633,8 @@ async function main() {
     join(__dirname, '..', 'frontend', 'package.json'), 'utf8'))
   const { existsSync } = await import('node:fs')
   const appOrigin = await cdp.eval(`location.origin`)
-  check('AE1 release version = 1.0.0',
-    relVersion === '1.0.0' && pkg.version === '1.0.0',
+  check('AE1 release version = 1.0.1',
+    relVersion === '1.0.1' && pkg.version === '1.0.1',
     `openapi=${relVersion} package=${pkg.version}`)
   check('AE2 production UI served without Vite (backend://8765, not :5173)',
     appOrigin.startsWith('http://127.0.0.1:8765') && !appOrigin.includes('5173'),
@@ -1653,13 +1653,156 @@ async function main() {
     (await cdp.eval(`document.querySelector('.header')?.innerText ?? ''`)).toUpperCase().includes('READ ONLY'),
     'header carries READ ONLY')
   const files = ['Start-SystemWatch.ps1', 'Start-SystemWatch.bat', 'Setup-SystemWatch.ps1',
-    'docs/RELEASE_1.0.0.md', 'docs/ARCHITECTURE.md', 'docs/PHASES.md', 'CHANGELOG.md', 'README.md']
+    'docs/RELEASE_1.0.0.md', 'docs/RELEASE_1.0.1.md', 'docs/ARCHITECTURE.md', 'docs/PHASES.md', 'CHANGELOG.md', 'README.md']
   const missing = files.filter(f => !existsSync(join(__dirname, '..', f)))
   check('AE8 release files present (launcher, setup, docs, changelog)',
     missing.length === 0, missing.length ? `missing: ${missing.join(', ')}` : 'all present')
   check('AE9 single healthy instance behind 127.0.0.1:8765',
     (await (await fetch(`${api}/api/health`)).json()).status === 'ok',
     'health ok on the production URL')
+
+  // ---- AF - REAL GRAPH VISIBILITY / CAMERA (v1.0.1) ---------------------
+  // v1.0.0's automated acceptance was green yet the user's real browser
+  // showed a blank graph: "nodes exist" is NOT the same as "nodes are visible
+  // to the user". These checks drive the live Cytoscape instance through the
+  // viewportHealth() diagnostic and the camera controls to guarantee the real
+  // production graph is actually on screen. Robust thresholds only — never
+  // machine-specific exact counts.
+  const vh = () => cdp.eval(`window.__esw_controller?.viewportHealth() ?? null`)
+  const gvh = async () => {
+    const h = await vh()
+    if (!h) return null
+    return h
+  }
+  let hh = await gvh()
+  check('AF1 production real snapshot has >0 nodes', !!(hh && hh.totalNodes > 0), `nodes=${hh?.totalNodes}`)
+  check('AF2 visibleNodes > 0', !!(hh && hh.visibleNodes > 0), `visible=${hh?.visibleNodes}`)
+  check('AF3 viewport-intersecting real nodes > 0', !!(hh && hh.viewportNodes > 0), `viewport=${hh?.viewportNodes}`)
+  // a large real graph (>100 visible) must keep meaningful viewport coverage —
+  // the "hundreds exist / zero displayed" condition of v1.0.0 must be impossible
+  if (hh && hh.visibleNodes >= 100) {
+    check('AF4 large real graph has meaningful viewport coverage',
+      hh.viewportNodes >= 20, `viewport=${hh.viewportNodes} visible=${hh.visibleNodes} (need >=20)`)
+  } else {
+    check('AF4 large real graph has meaningful viewport coverage', true, 'small graph — threshold not applicable')
+  }
+  check('AF9 container width/height non-zero', !!(hh && hh.containerWidth > 0 && hh.containerHeight > 0),
+    `${hh?.containerWidth}x${hh?.containerHeight}`)
+  check('AF5 layout finished (layoutState idle after settle)',
+    !!(hh && hh.layoutState === 'idle'), `layoutState=${hh?.layoutState}`)
+
+  // AF6/AF7 — FIT ALL must return an offscreen graph and must NOT apply a
+  // destructive hard zoom floor: "fit all" means all visible topology fits.
+  await cdp.eval(`(() => { window.__esw_cy.pan({ x: -50000, y: -50000 }); return true })()`)
+  await sleep(500)
+  hh = await gvh()
+  check('AF6 pan-away empties viewport (sanity: offscreen graph)',
+    !!(hh && hh.viewportNodes === 0), `viewport=${hh?.viewportNodes}`)
+  await cdp.eval(`(() => { window.__esw_controller?.fit(); return true })()`)
+  await sleep(700)
+  hh = await gvh()
+  check('AF6 FIT ALL returns offscreen graph to viewport',
+    !!(hh && hh.viewportNodes > 0), `viewport=${hh?.viewportNodes} zoom=${hh?.zoom?.toFixed(3)}`)
+  // after FIT ALL, all visible topology must fit inside the container (the
+  // rendered viewport content is not pushed off-screen by a zoom floor)
+  const fitBox = await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    const els = cy.elements(':visible')
+    if (!els.length) return null
+    const bb = els.boundingBox()
+    const W = cy.width(), H = cy.height(), z = cy.zoom(), p = cy.pan()
+    // rendered span of visible bounding box within viewport
+    const rx1 = bb.x1*z + p.x, rx2 = bb.x2*z + p.x
+    const ry1 = bb.y1*z + p.y, ry2 = bb.y2*z + p.y
+    return { rx1, rx2, ry1, ry2, W, H }
+  })()`)
+  const fitsInside = fitBox && fitBox.rx1 >= -5 && fitBox.rx2 <= fitBox.W + 5 &&
+    fitBox.ry1 >= -5 && fitBox.ry2 <= fitBox.H + 5
+  check('AF7 FIT ALL keeps all visible topology on-screen (no destructive floor)',
+    !!fitsInside, fitBox ? `rendered ${fitBox.rx1.toFixed(0)},${fitBox.ry1.toFixed(0)}-${fitBox.rx2.toFixed(0)},${fitBox.ry2.toFixed(0)} in ${fitBox.W}x${fitBox.H}` : 'n/a')
+  // explicit: FIT ALL must never zoom back to a hard 0.55 floor when the true
+  // fit is much lower on a large graph
+  hh = await gvh()
+  if (hh && hh.visibleNodes >= 100) {
+    check('AF7 FIT ALL does not force destructive 0.55 floor (adaptive)',
+      hh.zoom < 0.55, `zoom=${hh.zoom?.toFixed(3)} (< 0.55 => true fit kept)`)
+  } else {
+    check('AF7 FIT ALL does not force destructive 0.55 floor (adaptive)', true, 'small graph')
+  }
+
+  // AF8 — RELAYOUT finishes layout then the graph is visible again
+  await cdp.eval(`(() => { window.__esw_controller?.relayout(); return true })()`)
+  let relZoom = null, relVp = null
+  for (let i = 0; i < 15; i++) {
+    await sleep(700)
+    const h2 = await gvh()
+    if (h2 && h2.layoutState === 'idle') { relZoom = h2.zoom; relVp = h2.viewportNodes; break }
+  }
+  hh = await gvh()
+  check('AF8 RELAYOUT finishes then graph is visible',
+    !!(hh && hh.layoutState === 'idle' && hh.viewportNodes > 0),
+    `viewport=${hh?.viewportNodes} layoutState=${hh?.layoutState}`)
+
+  // AF10 — ALL filter restores all nodes visibly (no hidden-state leak)
+  await cdp.eval(`(() => {
+    if (window.__esw_controller) window.__esw_controller.setFilter('all')
+  })()`)
+  await sleep(700)
+  hh = await gvh()
+  check('AF10 ALL filter keeps nodes visible',
+    !!(hh && hh.visibleNodes > 0 && hh.viewportNodes > 0),
+    `visible=${hh?.visibleNodes} viewport=${hh?.viewportNodes}`)
+
+  // AF11 — SYSTEM/AI/INFRA toggle does not lose the graph
+  await cdp.eval(`(() => {
+    const btns = [...document.querySelectorAll('.header .pill.sem-view')]
+    const ai = btns.find(b => b.textContent.trim() === 'AI')
+    if (ai) ai.click()
+    return true
+  })()`)
+  await sleep(1000)
+  hh = await gvh()
+  const aiVisible = !!(hh && hh.viewportNodes > 0)
+  await cdp.eval(`(() => {
+    const btns = [...document.querySelectorAll('.header .pill.sem-view')]
+    const sys = btns.find(b => b.textContent.trim() === 'SYSTEM')
+    if (sys) sys.click()
+    return true
+  })()`)
+  await sleep(1000)
+  hh = await gvh()
+  check('AF11 SYSTEM/AI/INFRA toggle does not lose graph visibility',
+    aiVisible && !!(hh && hh.viewportNodes > 0),
+    `aiViewport=${aiVisible} sysViewport=${hh?.viewportNodes}`)
+
+  // AF12 — browser resize -> renderer container stays aligned/nonzero
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1280, height: 800, deviceScaleFactor: 1, mobile: false,
+  })
+  await sleep(1200)
+  hh = await gvh()
+  const resizedOK = !!(hh && hh.containerWidth > 0 && hh.containerHeight > 0 &&
+    hh.containerWidth <= 1300 && hh.containerHeight <= 900)
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false,
+  })
+  await sleep(1000)
+  check('AF12 browser resize keeps renderer container aligned', resizedOK,
+    `${hh?.containerWidth}x${hh?.containerHeight}`)
+
+  // AF13 — production dist is the tested build (served by backend, no Vite)
+  const servedOrigin = await cdp.eval(`location.origin`)
+  check('AF13 production dist is the served/tested build (no Vite)',
+    servedOrigin.startsWith('http://127.0.0.1:8765') && !servedOrigin.includes('5173'),
+    `origin=${servedOrigin}`)
+
+  // AF14 — no benchmark/fixture nodes
+  const benchNodes = await cdp.eval(
+    `window.__esw_cy ? (window.__esw_cy.nodes('[?benchmark]').length + window.__esw_cy.nodes('[?fixture]').length + window.__esw_cy.nodes('[?test_only]').length) : -1`)
+  const benchStatus = await (await fetch(`${api}/api/benchmark/status`)).json()
+  check('AF14 no benchmark/fixture nodes',
+    (!benchStatus || benchStatus.active === false) && benchNodes === 0,
+    `benchmark=${benchStatus?.active} fixtureNodes=${benchNodes}`)
 
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact

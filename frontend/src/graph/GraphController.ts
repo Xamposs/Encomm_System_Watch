@@ -364,10 +364,17 @@ interface EdgeActivityState {
 
 const ZOOM_FAR = 0.38
 const ZOOM_CLOSE = 0.8
-/** Initial overview floor: fit must never land below this zoom, so the
- * opening view shows readable labels on a broad swath of the machine
- * (v0.6.0 UI fidelity — "live machine map" first impression). */
-const OVERVIEW_MIN_ZOOM = 0.55
+/** Desired initial-overview zoom for readable labels (v0.6.0 look). Applied
+ * to the initial camera ONLY while it still keeps at least
+ * OVERVIEW_MIN_VIEWPORT_FRACTION of the visible graph inside the viewport —
+ * never a destructive hard floor that can empty the viewport on large graphs
+ * (v1.0.1 hotfix). */
+const OVERVIEW_DESIRED_ZOOM = 0.55
+/** Minimum fraction of visible nodes that must remain inside the viewport
+ * after an initial-overview zoom-in. When zooming to OVERVIEW_DESIRED_ZOOM
+ * would drop below this, the camera stops at the largest safe zoom instead of
+ * forcing the overview — so a large real graph is never lost (v1.0.1). */
+const OVERVIEW_MIN_VIEWPORT_FRACTION = 0.5
 
 // incremental-layout policy (v0.3.1): on large graphs, small node additions
 // must NOT trigger an expensive fcose pass over the whole graph. Above
@@ -422,12 +429,29 @@ export class GraphController {
   /** last label actually written per node (avoids redundant cytoscape
    * dirtying on every metrics tick — v0.3.1 large-graph optimization) */
   private labelCache = new Map<string, string>()
+  // ---- v1.0.1 camera/viewport ------------------------------------------
+  /** true once the blank-graph safety recovery has run (view-only, once —
+   * must never fight the user's own pan/zoom after initial placement). */
+  private safetyRecovered = false
+  /** layout lifecycle state (surfaced by viewportHealth()) */
+  private layoutState: 'idle' | 'active' = 'idle'
+  /** keeps the cytoscape renderer glued to the shell's final dimensions */
+  private resizeObs: ResizeObserver | undefined
 
   constructor(
     private cy: Core,
     container: HTMLElement,
   ) {
     this.overlay = new EdgePulseOverlay(cy, container)
+    // v1.0.1: keep the renderer glued to the shell's final dimensions so a
+    // layout is never computed against a 0 / stale container (container
+    // size does NOT only change on window resize — drawer/panel toggles move
+    // the shell around it). cytoscape's own autoResize is window-orientated;
+    // a ResizeObserver catches every container geometry change.
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObs = new ResizeObserver(() => cy.resize())
+      this.resizeObs.observe(container)
+    }
     cy.on('add', 'node', () => {
       this.pendingNewNodes += 1
       this.scheduleIncrementalLayout()
@@ -1616,22 +1640,37 @@ export class GraphController {
       fit: kind === 'initial',
     }
     const t0 = performance.now()
+    this.layoutState = 'active'
     try {
       const layout = this.cy.layout(options)
       let stopped = false
       const onStop = (): void => {
         if (stopped) return
         stopped = true
+        this.layoutState = 'idle'
         perf.recordLayout(performance.now() - t0)
-        if (kind === 'initial') this.fitOverview()
+        // v1.0.1: the layoutstop EVENT is the single source of layout
+        // completion. The camera is fitted only here, on fcose's FINAL node
+        // positions. (The old `if (!animate) onStop()` manual call ran the
+        // fit before fcose reached usable positions on some paths and had to
+        // be bailed out by fcose's own internal fit — a race that produced
+        // the blank-graph camera on the user's machine.)
+        if (kind === 'initial') {
+          this.fitOverview()
+          this.safetyRecover()
+        }
       }
+      // register BEFORE run() so a synchronous layoutstop still lands here
       layout.one('layoutstop', onStop)
       layout.run()
-      if (!animate) onStop()
     } catch {
+      this.layoutState = 'idle'
       this.cy.layout({ name: 'cose', animate: false } as never).run()
       perf.recordLayout(performance.now() - t0)
-      if (kind === 'initial') this.fitOverview()
+      if (kind === 'initial') {
+        this.fitOverview()
+        this.safetyRecover()
+      }
     }
   }
 
@@ -1659,22 +1698,129 @@ export class GraphController {
   }
 
   /**
-   * Overview fit (v0.6.0): fit the graph, then clamp the zoom to a floor so
-   * the opening view never lands in the unlabeled far bucket — the user sees
-   * a broad, dense, readable overview immediately.
+   * Manual FIT ALL (v1.0.1): true fit of the CURRENTLY VISIBLE topology —
+   * never a zoom floor on top, so "fit all" can never shove content
+   * off-screen. This is what the toolbar FIT button must mean.
+   */
+  fit(): void {
+    const eles = this.cy.elements(':visible')
+    if (eles.length) this.cy.fit(eles, 40)
+  }
+
+  /**
+   * Initial overview (v1.0.1): fit all visible elements, then modestly zoom
+   * toward OVERVIEW_DESIRED_ZOOM for readable labels — but ONLY while at
+   * least OVERVIEW_MIN_VIEWPORT_FRACTION of the visible nodes stay inside the
+   * viewport. There is NO destructive hard floor: on a large real graph the
+   * camera keeps the true fit so the map is never lost.
    */
   fitOverview(): void {
-    this.cy.fit(undefined, 40)
-    if (this.cy.zoom() < OVERVIEW_MIN_ZOOM) {
+    const eles = this.cy.elements(':visible')
+    if (!eles.length) return
+    this.cy.fit(eles, 40)
+    const desired = OVERVIEW_DESIRED_ZOOM
+    if (this.cy.zoom() >= desired) return
+    const safe = this.safeOverviewZoom(desired)
+    if (safe > this.cy.zoom()) {
       this.cy.zoom({
-        level: OVERVIEW_MIN_ZOOM,
+        level: safe,
         renderedPosition: { x: this.cy.width() / 2, y: this.cy.height() / 2 },
       } as unknown as ZoomOptions)
     }
   }
 
-  fit(): void {
-    this.fitOverview()
+  /** Largest zoom (<= desired) that still keeps >= OVERVIEW_MIN_VIEWPORT_FRACTION
+   * of the visible NODES inside the viewport, for a camera centered on the
+   * visible graph's bounding box (the same box cy.fit centers on). At the
+   * current (true-fit) zoom the whole graph is in viewport, so a safe value
+   * always exists in [zoom, desired]. */
+  private safeOverviewZoom(desired: number): number {
+    const cy = this.cy
+    const eles = cy.elements(':visible')
+    const nodes = eles.filter((el) => el.isNode())
+    if (!nodes.length) return cy.zoom()
+    const bb = eles.boundingBox()
+    const cx = (bb.x1 + bb.x2) / 2
+    const cyy = (bb.y1 + bb.y2) / 2
+    const W = cy.width()
+    const H = cy.height()
+    const fracAt = (z: number): number => {
+      const hw = W / 2 / z
+      const hh = H / 2 / z
+      let inside = 0
+      nodes.forEach((n) => {
+        const p = n.position()
+        if (Math.abs(p.x - cx) <= hw && Math.abs(p.y - cyy) <= hh) inside++
+      })
+      return inside / nodes.length
+    }
+    const lo = cy.zoom()
+    const hi = desired
+    if (fracAt(hi) >= OVERVIEW_MIN_VIEWPORT_FRACTION) return hi
+    let a = lo
+    let b = hi
+    for (let i = 0; i < 24; i++) {
+      const m = (a + b) / 2
+      if (fracAt(m) >= OVERVIEW_MIN_VIEWPORT_FRACTION) a = m
+      else b = m
+    }
+    return (a + b) / 2
+  }
+
+  /**
+   * Blank-graph safety recovery (v1.0.1): after the initial layout + fit, if
+   * the graph has visible nodes but NONE intersect the viewport, perform ONE
+   * view-only correction (resize, then re-fit the visible elements). Runs a
+   * single time per controller and never re-arms — it must not fight the
+   * user's own pan/zoom after initial placement.
+   */
+  private safetyRecover(): void {
+    if (this.safetyRecovered) return
+    this.safetyRecovered = true
+    const cy = this.cy
+    const vis = cy.nodes(':visible')
+    if (!vis.length) return
+    const W = cy.width()
+    const H = cy.height()
+    let inView = 0
+    vis.forEach((nn) => {
+      const p = nn.renderedPosition()
+      if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) inView++
+    })
+    if (inView > 0) return
+    cy.resize()
+    const eles = cy.elements(':visible')
+    if (eles.length) cy.fit(eles, 40)
+  }
+
+  /** Read-only viewport/graph health diagnostic (acceptance + debugging):
+   * "nodes exist" is not the same as "nodes are visible to the user". */
+  viewportHealth(): Record<string, unknown> {
+    const cy = this.cy
+    const vis = cy.nodes(':visible')
+    const W = cy.width()
+    const H = cy.height()
+    let viewportNodes = 0
+    vis.forEach((nn) => {
+      const p = nn.renderedPosition()
+      if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) viewportNodes++
+    })
+    const visBB = vis.length ? vis.boundingBox() : null
+    return {
+      totalNodes: cy.nodes().length,
+      visibleNodes: vis.length,
+      viewportNodes,
+      totalEdges: cy.edges().length,
+      visibleEdges: cy.edges(':visible').length,
+      zoom: cy.zoom(),
+      pan: { x: cy.pan().x, y: cy.pan().y },
+      graphBoundingBox: visBB
+        ? { x1: visBB.x1, y1: visBB.y1, x2: visBB.x2, y2: visBB.y2 }
+        : null,
+      containerWidth: W,
+      containerHeight: H,
+      layoutState: this.layoutState,
+    }
   }
 
   zoomIn(): void {
@@ -1921,6 +2067,8 @@ export class GraphController {
       clearInterval(this.activityDecayTimer)
       this.activityDecayTimer = undefined
     }
+    this.resizeObs?.disconnect()
+    this.resizeObs = undefined
     this.selBoxCleanup?.()
     this.overlay.destroy()
   }

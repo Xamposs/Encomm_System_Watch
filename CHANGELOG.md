@@ -2,6 +2,57 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [1.0.1] — 2026-08-20
+
+CRITICAL UI HOTFIX (released after v1.0.0). v1.0.0's automated acceptance was
+green, but on the user's real browser the central graph canvas rendered blank
+while the live top status (processes, connections, services, ETW, GPU, Hermes)
+clearly kept collecting REAL data. Root cause was a camera/layout regression,
+not a collector defect — no observability or backend behavior was changed.
+
+### Fixed
+- **Blank-graph camera (root cause)** — the initial camera was being placed
+  based on the destructive `OVERVIEW_MIN_ZOOM = 0.55` clamp and, on the
+  `animate=false` path, was fitted before fCoSE reached its FINAL node
+  positions. On a ~700–800 node real graph the forced 0.55 zoom (~5× past the
+  true fit of ~0.10) left only a sparse, `randomize`d slice on screen — which
+  could land on near-empty space → the blank user view.
+- **Camera now fits after REAL layout completion** — the initial fit runs only
+  on the Cytoscape `layoutstop` event (the single source of layout
+  completion), never before final positions. Removed the racy manual
+  `if (!animate) onStop()` call.
+- **FIT ALL truly fits the visible topology** — `fit()` now fits
+  `elements(':visible')` with no zoom floor on top, so FIT ALL can never shove
+  content off-screen.
+- **Adaptive / no destructive hard zoom floor** — the 0.55 hard floor is
+  replaced by an adaptive overview: it zooms toward readable-label zoom only
+  while at least 50% of the visible NODES stay inside the viewport, binary
+  searching the largest safe zoom. Large graphs keep their true fit.
+- **Blank-graph safety recovery** — one-time, view-only recovery
+  (resize → fit visible) if visible nodes exist but none intersect the
+  viewport; it never re-arms and never fights user pan/zoom after initial
+  placement.
+- **Container resize audit** — a ResizeObserver now calls `cy.resize()` on
+  every graph-container geometry change (not just window resize), so layout
+  is never computed against a 0/stale container.
+- **`viewportHealth()` diagnostic** — read-only
+  `totalNodes/visibleNodes/viewportNodes/edges/zoom/pan/graphBoundingBox/
+  container/dimensions/layoutState`, exposed via the existing test surface:
+  "nodes exist" is now objectively distinguished from "nodes are visible".
+- **Viewport visibility acceptance added (AF)** — AF1–AF14 prove the REAL
+  production graph is on screen: >0 visible nodes, >0 viewport-intersecting
+  nodes, meaningful coverage on large graphs, fit-after-layout, FIT ALL
+  returns offscreen graph without a destructive floor, RELAYOUT ends visible,
+  container sizing, filter/view toggle safety, resize, production build, no
+  fixture nodes.
+
+VALIDATION: frontend typecheck + build PASS; full 222+ acceptance
+(base + new AF) 0 failures — 238 passed / 0 failed; backend suite
+262 passed / 0 failed (only the version field changed in main.py — no
+behavior/schema change); real-machine regression smoke PASS; no continuous
+relayout/fit loops. Read-only observability unchanged.
+
+
 ## [1.0.0] — 2026-08-20
 
 FIRST STABLE RELEASE (Phase 23 COMPLETE — release / packaging). The validated

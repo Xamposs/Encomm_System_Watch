@@ -382,7 +382,8 @@ See [docs/PHASES.md](docs/PHASES.md) — Phases 1–22 complete (all observabili
 layers, ETW, GPU, semantics, AI telemetry pipeline) with **Phase 17
 FUNCTIONAL** (deep tokens/TPS/tool-call telemetry awaits a safe producer
 interface) and **Phase 23 COMPLETE** (v1.0.0 release / packaging — install
-script, production launcher, release docs, tagged).
+script, production launcher, release docs, tagged) with **v1.0.1** — a critical
+UI hotfix that restored real graph visibility (camera/layout fix).
 
 ## Repository
 

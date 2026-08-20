@@ -22,7 +22,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '1.0.0'
+$Version = '1.0.1'
 
 # --- project layout (all path operations are space-safe via Join-Path) ----
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
