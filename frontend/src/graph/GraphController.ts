@@ -50,18 +50,15 @@ function edgeCurveDist(e: EdgeSingular): number {
   const id = e.id()
   let h = 0
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
-  const sb = e.source().data('rackBand') as number | undefined
-  const tb = e.target().data('rackBand') as number | undefined
-  if (typeof sb === 'number' && typeof tb === 'number') {
-    // corridor lane: same source region + same target region => same sign &
-    // similar magnitude => parallel fan-out/fan-in; jitter keeps edges apart
-    const sign = tb >= sb ? 1 : -1
-    const lane = ((sb * 17 + tb * 29 + ((h >> 3) & 7)) % 6) - 3 // -3..2, stable
-    const base = Math.min(130, Math.max(32, len * 0.16))
-    return sign * (base + lane * 5 + ((h >> 7) & 3) * 2)
-  }
-  const sign = h % 2 === 0 ? 1 : -1
-  const d = Math.min(120, Math.max(30, len * 0.18))
+  const sb = Number(e.source().data('rackBand') ?? 0)
+  const tb = Number(e.target().data('rackBand') ?? 0)
+  // Reference-style wiring field: stable but deliberately varied bows. The
+  // relationship stays exact; only the visual route is diversified so real
+  // edges do not collapse into a few thick corridors.
+  const sign = ((h >>> 2) & 1) === 0 ? 1 : -1
+  const lane = ((Math.abs(sb - tb) + ((h >>> 5) & 15)) % 9) - 4
+  const strength = 0.13 + ((h >>> 10) & 7) * 0.018
+  const d = Math.min(230, Math.max(38, len * strength + lane * 8))
   return sign * d
 }
 
@@ -280,11 +277,11 @@ export const STYLESHEET: StylesheetStyle[] = [
     selector: 'edge',
     style: {
       'line-color': '#3f5a75',
-      width: 1.35,
+      width: 1.05,
       'curve-style': 'unbundled-bezier',
       'control-point-distances': (e) => edgeCurveDist(e as EdgeSingular),
       'control-point-weights': 0.5,
-      opacity: 0.85,
+      opacity: 0.26,
       'target-arrow-shape': 'triangle',
       'target-arrow-color': '#3f5a75',
       'arrow-scale': 0.5,
@@ -296,9 +293,9 @@ export const STYLESHEET: StylesheetStyle[] = [
       'transition-duration': '300ms' as unknown as number,
     },
   },
-  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#4fd2f7', 'target-arrow-shape': 'none', width: 1.7, opacity: 0.92 } },
-  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#5ee89a', 'target-arrow-shape': 'none', 'line-style': 'dashed', width: 1.4 } },
-  { selector: 'edge[kind = "EXTERNAL"]', style: { 'line-color': '#3f9fe8', 'target-arrow-color': '#3f9fe8', width: 1.6, opacity: 0.9 } },
+  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#4fd2f7', 'target-arrow-shape': 'none', width: 1.2, opacity: 0.38 } },
+  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#5ee89a', 'target-arrow-shape': 'none', 'line-style': 'dashed', width: 1.15, opacity: 0.42 } },
+  { selector: 'edge[kind = "EXTERNAL"]', style: { 'line-color': '#3f9fe8', 'target-arrow-color': '#3f9fe8', width: 1.2, opacity: 0.4 } },
   // ---- semantic edges (v0.3.0) -------------------------------------------
   { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#2fe6a8', 'target-arrow-color': '#2fe6a8', 'line-style': 'dashed', width: 1.7 } },
   { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#b06cff', 'target-arrow-color': '#b06cff', width: 1.8 } },
@@ -377,6 +374,66 @@ export const STYLESHEET: StylesheetStyle[] = [
       'line-style': 'dashed', width: 1.4, opacity: 0.75,
     },
   },
+  // The visible node surface is the rich HTML card layer. Cytoscape still
+  // owns these transparent node rectangles for layout, edge endpoints,
+  // hit-testing, selection and all graph interactions.
+  {
+    selector: 'node',
+    style: {
+      width: 184,
+      height: 64,
+      shape: 'round-rectangle',
+      label: '',
+      'background-opacity': 0,
+      'border-opacity': 0,
+      'text-opacity': 0,
+      'overlay-opacity': 0,
+    },
+  },
+  // Adaptive performance LOD: FIT ALL / far zoom uses Cytoscape's single
+  // canvas instead of hundreds of HTML cards. The cards return automatically
+  // when the user zooms in far enough to read them.
+  {
+    selector: 'node.card-lod',
+    style: {
+      label: 'data(cardTitle)',
+      width: 126,
+      height: 34,
+      'background-opacity': 0.78,
+      'background-color': '#111a29',
+      'border-opacity': 0.9,
+      'border-color': '#37667b',
+      'border-width': 1,
+      'text-opacity': 0.86,
+      color: '#a9bdd0',
+      'font-size': 8.5,
+      'text-background-opacity': 0,
+      'text-max-width': '112px',
+    },
+  },
+  { selector: 'node.card-lod[kind = "SERVICE"]', style: { 'border-color': '#a87319', color: '#d7aa57' } },
+  { selector: 'node.card-lod[kind = "GPU"], node.card-lod[kind = "LISTENING_PORT"]', style: { 'border-color': '#2a9f77', color: '#71d8b1' } },
+  { selector: 'node.card-lod[kind = "SEMANTIC"], node.card-lod[kind = "AI_RUNTIME"]', style: { 'border-color': '#b83a83', color: '#e477b9' } },
+  { selector: 'node.card-lod[kind = "EXTERNAL_ENDPOINT"]', style: { 'border-color': '#2786ae', color: '#70c8eb' } },
+  {
+    selector: 'node.signal-source, node.signal-target',
+    style: {
+      'border-opacity': 1,
+      'border-color': '#b8f7ff',
+      'border-width': 2.4,
+      'overlay-opacity': 0.25,
+      'overlay-color': '#35e0ff',
+    },
+  },
+  {
+    selector: 'edge.signal-live',
+    style: {
+      'line-color': '#35e0ff',
+      'target-arrow-color': '#35e0ff',
+      opacity: 0.92,
+      width: 2.4,
+    },
+  },
 ]
 
 function portLabel(ports: number[]): string {
@@ -411,17 +468,6 @@ interface EdgeActivityState {
 
 const ZOOM_FAR = 0.38
 const ZOOM_CLOSE = 0.8
-/** Desired initial-overview zoom for readable labels (v0.6.0 look). Applied
- * to the initial camera ONLY while it still keeps at least
- * OVERVIEW_MIN_VIEWPORT_FRACTION of the visible graph inside the viewport —
- * never a destructive hard floor that can empty the viewport on large graphs
- * (v1.0.1 hotfix). */
-const OVERVIEW_DESIRED_ZOOM = 0.55
-/** Minimum fraction of visible nodes that must remain inside the viewport
- * after an initial-overview zoom-in. When zooming to OVERVIEW_DESIRED_ZOOM
- * would drop below this, the camera stops at the largest safe zoom instead of
- * forcing the overview — so a large real graph is never lost (v1.0.1). */
-const OVERVIEW_MIN_VIEWPORT_FRACTION = 0.5
 
 // incremental-layout policy (v0.3.1): on large graphs, small node additions
 // must NOT trigger an expensive fcose pass over the whole graph. Above
@@ -547,6 +593,10 @@ export class GraphController {
       t?.source && t.source !== 'NONE' ? t.source : 'SOCKET EVENTS (TIER 0)'
   }
 
+  setSignalAnimations(on: boolean): void {
+    this.overlay.setEnabled(on)
+  }
+
   // -------------------------------------------------------- SYSTEM / AI / INFRA views
 
   /**
@@ -588,6 +638,7 @@ export class GraphController {
       }
       this.applyInfraView()
     })
+    this.refreshCardOverlay()
   }
 
   /** AI view: semantic resources + classified processes stay; noise dims. */
@@ -1113,7 +1164,10 @@ export class GraphController {
 
   private flattenNode(n: TopoNode): Record<string, unknown> {
     const { data, ...rest } = n
-    return { ...rest, ...data }
+    const flat = { ...rest, ...data } as Record<string, unknown>
+    const rawTitle = data.display_name ?? data.name ?? data.model_id ?? data.address ?? rest.label ?? n.id
+    flat.cardTitle = String(rawTitle ?? n.id).replace(/\s+/g, ' ').split(' · ')[0].slice(0, 30)
+    return flat
   }
 
   // ------------------------------------------------------------------ events
@@ -1664,6 +1718,7 @@ export class GraphController {
         }
       })
     })
+    this.refreshCardOverlay()
   }
 
   // ------------------------------------------------------------ layout / view
@@ -1677,23 +1732,14 @@ export class GraphController {
   }
 
   /**
-   * v1.0.2 deterministic machine-map composition.
+   * Deterministic reference-style machine map.
    *
-   * Strategy (connection-aware, truthful): instead of trusting generic fcose
-   * to scatter a random cloud, the REAL graph structure is composed into a
-   * dense "wiring rack" — several narrow vertical bands (columns) of compact
-   * node stacks, with long-range real edges crossing between the bands.
-   *
-   * Ordering (never topology-flavored, always deterministic):
-   *   1. union-find connected components over the REAL edges
-   *   2. anchors (system/semantic/GPU/WSL/Docker/VM) lead the map
-   *   3. every connected node (degree > 0) follows, component-first, then
-   *      degree-descending — the connected core occupies the leading bands
-   *   4. stopped services -> compact dim service bank (right bands)
-   *   5. other zero-degree nodes -> compact orphan bank (last bands)
-   *   Within a band, nodes stack like rack entries (small vertical pitch).
-   * Column-major filling keeps bands narrow so the eye reads COLUMNS, not a
-   * broad cloud. Per-node deterministic hash jitter keeps it organic.
+   * The first camera view is a truthful operational cross-section: anchors,
+   * highest-degree connected nodes, running services and active processes.
+   * It is presented as two broad card fields rather than trying to shrink the
+   * entire Windows process table into one frame. Every remaining real node is
+   * still laid out in adjacent zones and remains available through pan/zoom or
+   * FIT ALL. No nodes or edges are synthesized and none are discarded.
    */
   private composeRackLayout(): void {
     const cy = this.cy
@@ -1748,8 +1794,9 @@ export class GraphController {
       } catch { /* dangling edge — ignore for composition */ }
     })
     const compRank = new Map<string, number>()
-    const roots = [...compSize.keys()].sort((a, b) => (compSize.get(b) ?? 0) - (compSize.get(a) ?? 0))
-    roots.forEach((r, i) => compRank.set(r, i < 60 ? i : 61))
+    const roots = [...new Set(nodes.map((nd) => find(nd.id())))]
+      .sort((a, b) => (compSize.get(b) ?? 0) - (compSize.get(a) ?? 0))
+    roots.forEach((r, i) => compRank.set(r, i))
 
     // 2) role classification (truthful: derived from node data, never invented)
     const isAnchorKind = (kk: string): boolean =>
@@ -1769,8 +1816,8 @@ export class GraphController {
       return deg > 0 ? 'core' : 'orphan'
     }
 
-    // 3) ordered, deterministic master lists (component-first, degree-desc,
-    //    then id — stable across snapshots)
+    // 3) ordered deterministic master lists: connectedness and observed
+    //    degree decide prominence; names/ids are stable tie-breakers.
     const orderKey = (el: NodeSingular): [number, number, string] => {
       const r = find(el.id())
       const rank = compRank.get(r) ?? 62
@@ -1801,100 +1848,165 @@ export class GraphController {
     })
     anchors.sort(byOrderKey)
     coreN.sort(byOrderKey)
-    banked.sort(byName)
-    orphanN.sort(byName)
+    banked.sort((a, b) => {
+      const ar = String(a.data('status') ?? '').toLowerCase() === 'running' ? 0 : 1
+      const br = String(b.data('status') ?? '').toLowerCase() === 'running' ? 0 : 1
+      return ar !== br ? ar - br : byName(a, b)
+    })
+    orphanN.sort((a, b) => {
+      const ac = Number(a.data('cpu_percent') ?? 0)
+      const bc = Number(b.data('cpu_percent') ?? 0)
+      return ac !== bc ? bc - ac : byName(a, b)
+    })
 
-    // 4) SEMANTIC-ZONE composition (v1.0.2 final pass): each role group
-    //    gets its own column band ("zone") with a visible gap between
-    //    zones, so the map reads as large semantic regions with internal
-    //    structure instead of one even grid. Within a zone, column-major
-    //    fill plus deterministic per-column jitter and a gentle lean keep
-    //    the racks organic ("organized chaos") while remaining stable.
-    const PITCH_Y = 40
-    const PITCH_X = 182
-    const ZONE_GAP = 110
-    const viewAspect = cy.width() / Math.max(1, cy.height())
-    // rows per column: solved so the composed rack (incl. zone gaps)
-    // roughly matches the viewport aspect at fit
-    let rows = 24
-    {
-      let bestA = Infinity
-      for (let r = 14; r <= 60; r++) {
-        const colsEst = Math.ceil(n / r) + 4
-        const w = colsEst * PITCH_X + 3 * ZONE_GAP
-        const h = r * PITCH_Y
-        const a = Math.abs(w / Math.max(1, h) - viewAspect)
-        if (a < bestA) { bestA = a; rows = r }
-      }
-    }
+    // 4) Build two camera-ready fields from the most operationally relevant
+    //    real nodes. The rest continue into large adjacent archives.
+    const OVERVIEW_COLUMNS = 6
+    const OVERVIEW_ZONE_SIZE = 24
+    const PITCH_X = 232
+    const PITCH_Y = 88
     const strHash = (s: string): number => {
       let h = 0
       for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
       return h
     }
-    const zones: Array<{ list: NodeSingular[]; role: string; label: string }> = [
-      { list: anchors, role: 'anchor', label: 'HOSTS · SEMANTIC · INFRA' },
-      { list: coreN, role: 'core', label: 'CONNECTED CORE' },
-      { list: banked, role: 'banked', label: 'SERVICES · UNLINKED' },
-      { list: orphanN, role: 'orphan', label: 'PROCESSES · UNLINKED' },
-    ]
-
-    const colOf = new Map<string, number>()
-    const roleOfNodeId = new Map<string, string>()
-    const posMap = new Map<string, { x: number; y: number }>()
-    const zoneLayout: ZoneInfo[] = []
-    let bandBase = 0
-    let xCursor = 0
-    for (const z of zones) {
-      if (z.list.length === 0) continue
-      const zoneCols = Math.max(1, Math.ceil(z.list.length / rows))
-      for (let i = 0; i < z.list.length; i++) {
-        const c = Math.floor(i / rows)
-        const r = i % rows
-        const nd = z.list[i]
-        const h = strHash(nd.id())
-        const colJitter = ((h >> 4) % 21) - 10
-        const rowJitter = ((h >> 7) % 11) - 5
-        const lean = Math.sin(c * 0.6) * 9
-        // per-column vertical stagger: breaks the perfect horizontal
-        // alignment between columns (organic feel) without overlapping
-        // rows inside a column
-        const stagger = ((c % 3) - 1) * 9
-        colOf.set(nd.id(), bandBase + c)
-        roleOfNodeId.set(nd.id(), z.role)
-        posMap.set(nd.id(), {
-          x: xCursor + c * PITCH_X + colJitter + lean,
-          y: r * PITCH_Y + rowJitter + stagger,
-        })
+    const used = new Set<string>()
+    const takeUnique = (source: NodeSingular[], limit: number): NodeSingular[] => {
+      const out: NodeSingular[] = []
+      for (const nd of source) {
+        if (used.has(nd.id())) continue
+        used.add(nd.id())
+        out.push(nd)
+        if (out.length >= limit) break
       }
-      zoneLayout.push({
-        label: z.label,
-        role: z.role,
-        x0: xCursor - 10,
-        x1: xCursor + zoneCols * PITCH_X + 10,
-        y0: -44,
-      })
-      bandBase += zoneCols
-      xCursor += zoneCols * PITCH_X + ZONE_GAP
+      return out
+    }
+    const overviewA = takeUnique([...anchors, ...coreN], OVERVIEW_ZONE_SIZE)
+    const runningServices = banked.filter((nd) => String(nd.data('status') ?? '').toLowerCase() === 'running')
+    const overviewBSeed = [
+      ...coreN,
+      ...runningServices,
+      ...orphanN.filter((nd) => Number(nd.data('cpu_percent') ?? 0) > 0),
+      ...banked,
+      ...orphanN,
+    ]
+    const overviewB = takeUnique(overviewBSeed, OVERVIEW_ZONE_SIZE)
+    if (overviewA.length < OVERVIEW_ZONE_SIZE) {
+      overviewA.push(...takeUnique([...banked, ...orphanN], OVERVIEW_ZONE_SIZE - overviewA.length))
+    }
+    if (overviewB.length < OVERVIEW_ZONE_SIZE) {
+      overviewB.push(...takeUnique([...anchors, ...coreN, ...banked, ...orphanN], OVERVIEW_ZONE_SIZE - overviewB.length))
     }
 
-    // 5) write positions + composition metadata (deterministic)
+    const remainingConnected = [...anchors, ...coreN].filter((nd) => !used.has(nd.id()))
+    const remainingServices = banked.filter((nd) => !used.has(nd.id()))
+    const remainingBackground = orphanN.filter((nd) => !used.has(nd.id()))
+
+    const posMap = new Map<string, { x: number; y: number }>()
+    const zoneLayout: ZoneInfo[] = []
+    let maxColumn = 0
+    let maxRow = 0
+    const place = (
+      list: NodeSingular[],
+      role: string,
+      label: string,
+      x0: number,
+      y0: number,
+      columns: number,
+      rowMajor: boolean,
+      overview = false,
+    ): { width: number; height: number } => {
+      if (!list.length) return { width: 0, height: 0 }
+      const rows = rowMajor ? Math.ceil(list.length / columns) : columns
+      const cols = rowMajor ? Math.min(columns, list.length) : Math.ceil(list.length / rows)
+      list.forEach((nd, i) => {
+        const c = rowMajor ? i % columns : Math.floor(i / rows)
+        const r = rowMajor ? Math.floor(i / columns) : i % rows
+        const h = strHash(nd.id())
+        const jx = ((h >>> 4) % 17) - 8
+        const jy = ((h >>> 9) % 13) - 6
+        posMap.set(nd.id(), { x: x0 + c * PITCH_X + jx, y: y0 + r * PITCH_Y + jy })
+        if (overview) nd.scratch('_overview', true)
+        maxColumn = Math.max(maxColumn, Math.round((x0 + c * PITCH_X) / PITCH_X))
+        maxRow = Math.max(maxRow, Math.round((y0 + r * PITCH_Y) / PITCH_Y))
+      })
+      const width = Math.max(184, (cols - 1) * PITCH_X + 184)
+      const height = Math.max(64, (rows - 1) * PITCH_Y + 64)
+      zoneLayout.push({ label, role, x0: x0 - 12, x1: x0 + width + 12, y0: y0 - 50 })
+      return { width, height }
+    }
+
+    place(
+      overviewA,
+      'overview-primary',
+      'LIVE SYSTEM TOPOLOGY  ·  OBSERVED PROCESSES, LINKS & PROVIDERS',
+      0,
+      0,
+      OVERVIEW_COLUMNS,
+      true,
+      true,
+    )
+    place(
+      overviewB,
+      'overview-secondary',
+      'SYSTEM CUSTODY  ·  SERVICES, INFRASTRUCTURE & ACTIVE WORKLOADS',
+      0,
+      380,
+      OVERVIEW_COLUMNS,
+      true,
+      true,
+    )
+    const connectedShape = place(
+      remainingConnected,
+      'core',
+      'CONNECTED CORE  ·  EXTENDED LIVE GRAPH',
+      0,
+      850,
+      8,
+      false,
+    )
+    const servicesX = Math.max(1900, connectedShape.width + 250)
+    place(
+      remainingServices,
+      'banked',
+      'SERVICE REGISTRY  ·  RUNNING & STOPPED',
+      servicesX,
+      850,
+      8,
+      false,
+    )
+    place(
+      remainingBackground,
+      'orphan',
+      'BACKGROUND WORKLOADS  ·  UNLINKED PROCESS INVENTORY',
+      0,
+      1700,
+      9,
+      false,
+    )
+
+    // 5) Write positions and visual role metadata in one batch.
     cy.batch(() => {
       nodes.forEach((nd) => {
         const pos = posMap.get(nd.id())
-        const c = colOf.get(nd.id()) ?? 0
         if (pos) nd.position(pos)
-        const role = roleOfNodeId.get(nd.id()) ?? ''
-        nd.data('rackBand', c)
-        nd.removeClass('svc-bank orphan-bank core-node')
-        if (role === 'banked') nd.addClass('svc-bank')
-        else if (role === 'orphan') nd.addClass('orphan-bank')
-        else if (role === 'core') nd.addClass('core-node')
+        const originalRole = roleOf(nd as NodeSingular)
+        nd.data('rackBand', pos ? Math.round(pos.x / PITCH_X) : 0)
+        nd.removeClass('svc-bank orphan-bank core-node anchor-node overview-node')
+        if (originalRole === 'banked') nd.addClass('svc-bank')
+        else if (originalRole === 'orphan') nd.addClass('orphan-bank')
+        else if (originalRole === 'core') nd.addClass('core-node')
+        else if (originalRole === 'anchor') nd.addClass('anchor-node')
+        if (nd.scratch('_overview')) {
+          nd.addClass('overview-node')
+          nd.removeScratch('_overview')
+        }
       })
     })
     this.zoneLayout = zoneLayout
-    this.rackColumns = bandBase
-    this.rackRows = Math.max(0, rows)
+    this.rackColumns = maxColumn + 1
+    this.rackRows = maxRow + 1
+    cy.container()?.dispatchEvent(new CustomEvent('esw:layout'))
   }
 
   /** Layout lifecycle (v1.0.2): the deterministic rack composition is the
@@ -1906,9 +2018,12 @@ export class GraphController {
       this.layoutState = 'active'
       try {
         this.composeRackLayout()
+        delete this.cy.container()?.dataset.composeError
       } catch (e) {
         console.error('[v1.0.2] composeRackLayout failed', e)
         ; (window as unknown as Record<string, unknown>).__esw_composeError = String(e)
+        const container = this.cy.container()
+        if (container) container.dataset.composeError = String(e)
         // fallback: never leave the map empty
         this.cy.layout({ name: 'cose', animate: false } as never).run()
       }
@@ -1937,13 +2052,25 @@ export class GraphController {
   }
 
   private scheduleIncrementalLayout(): void {
-    window.clearTimeout(this.layoutTimer)
+    // Throttle instead of debounce. On a busy live machine, add/remove events
+    // may never pause for two seconds; a pure debounce can therefore leave a
+    // fast reconnect's reconstructed graph stacked at the origin forever.
+    if (this.layoutTimer !== undefined) return
     this.layoutTimer = window.setTimeout(() => {
+      this.layoutTimer = undefined
       if (this.pendingNewNodes > 0) {
         const total = this.cy.nodes().length
         const large = total > LARGE_GRAPH_NODES
         const batch = this.pendingNewNodes
         this.pendingNewNodes = 0
+        const positioned = this.cy.nodes().some((element) => {
+          const p = (element as NodeSingular).position()
+          return Math.abs(p.x) > 1 || Math.abs(p.y) > 1
+        })
+        if (!positioned) {
+          this.runLayout('initial')
+          return
+        }
         if (large && batch < Math.max(LARGE_GRAPH_MIN_BATCH, Math.round(total * 0.05))) {
           // small additions on a large graph keep their anchor/center
           // positions — no full re-layout (preserves stability)
@@ -1951,7 +2078,7 @@ export class GraphController {
         }
         this.runLayout('incremental', batch)
       }
-    }, 2000)
+    }, 450)
   }
 
   /** Manual RELAYOUT: re-run the initial layout (fit + randomize). */
@@ -1974,64 +2101,21 @@ export class GraphController {
     if (eles.length) this.cy.fit(eles, 40)
   }
 
-  /**
-   * Initial overview (v1.0.1): fit all visible elements, then modestly zoom
-   * toward OVERVIEW_DESIRED_ZOOM for readable labels — but ONLY while at
-   * least OVERVIEW_MIN_VIEWPORT_FRACTION of the visible nodes stay inside the
-   * viewport. There is NO destructive hard floor: on a large real graph the
-   * camera keeps the true fit so the map is never lost.
-   */
+  /** Frame the operational cross-section. FIT ALL remains the explicit way
+   * to frame the complete machine inventory. */
   fitOverview(): void {
-    const eles = this.cy.elements(':visible')
+    const overview = this.cy.nodes('.overview-node:visible')
+    const eles = overview.length ? overview : this.cy.nodes(':visible')
     if (!eles.length) return
-    this.cy.fit(eles, 40)
-    const desired = OVERVIEW_DESIRED_ZOOM
-    if (this.cy.zoom() >= desired) return
-    const safe = this.safeOverviewZoom(desired)
-    if (safe > this.cy.zoom()) {
+    this.cy.fit(eles, 54)
+    // Large displays should not inflate the cards beyond their intended
+    // control-room scale; compact displays keep the true fit.
+    if (this.cy.zoom() > 0.92) {
       this.cy.zoom({
-        level: safe,
+        level: 0.92,
         renderedPosition: { x: this.cy.width() / 2, y: this.cy.height() / 2 },
       } as unknown as ZoomOptions)
     }
-  }
-
-  /** Largest zoom (<= desired) that still keeps >= OVERVIEW_MIN_VIEWPORT_FRACTION
-   * of the visible NODES inside the viewport, for a camera centered on the
-   * visible graph's bounding box (the same box cy.fit centers on). At the
-   * current (true-fit) zoom the whole graph is in viewport, so a safe value
-   * always exists in [zoom, desired]. */
-  private safeOverviewZoom(desired: number): number {
-    const cy = this.cy
-    const eles = cy.elements(':visible')
-    const nodes = eles.filter((el) => el.isNode())
-    if (!nodes.length) return cy.zoom()
-    const bb = eles.boundingBox()
-    const cx = (bb.x1 + bb.x2) / 2
-    const cyy = (bb.y1 + bb.y2) / 2
-    const W = cy.width()
-    const H = cy.height()
-    const fracAt = (z: number): number => {
-      const hw = W / 2 / z
-      const hh = H / 2 / z
-      let inside = 0
-      nodes.forEach((n) => {
-        const p = n.position()
-        if (Math.abs(p.x - cx) <= hw && Math.abs(p.y - cyy) <= hh) inside++
-      })
-      return inside / nodes.length
-    }
-    const lo = cy.zoom()
-    const hi = desired
-    if (fracAt(hi) >= OVERVIEW_MIN_VIEWPORT_FRACTION) return hi
-    let a = lo
-    let b = hi
-    for (let i = 0; i < 24; i++) {
-      const m = (a + b) / 2
-      if (fracAt(m) >= OVERVIEW_MIN_VIEWPORT_FRACTION) a = m
-      else b = m
-    }
-    return (a + b) / 2
   }
 
   /**
@@ -2243,6 +2327,7 @@ export class GraphController {
     // elements stay visually hidden. `cy.style().update()` forces the pass
     // (must run OUTSIDE the batch; a batched pass skips hidden elements).
     this.cy.style().update()
+    this.refreshCardOverlay()
   }
 
   setSearch(query: string): void {
@@ -2270,6 +2355,11 @@ export class GraphController {
         else n.data('dimmed', true)
       })
     })
+    this.refreshCardOverlay()
+  }
+
+  private refreshCardOverlay(): void {
+    this.cy.container()?.dispatchEvent(new CustomEvent('esw:cards-refresh'))
   }
 
   // ------------------------------------------------------------- inspector
@@ -2419,6 +2509,10 @@ export class GraphController {
   }
 
   destroy(): void {
+    if (this.layoutTimer !== undefined) {
+      window.clearTimeout(this.layoutTimer)
+      this.layoutTimer = undefined
+    }
     if (this.activityDecayTimer !== undefined) {
       clearInterval(this.activityDecayTimer)
       this.activityDecayTimer = undefined

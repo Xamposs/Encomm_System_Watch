@@ -1,9 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import cytoscape from 'cytoscape'
 import type { Filter } from '../types/system'
 import { GraphController, STYLESHEET } from './GraphController'
 import { WireUnderlay } from './WireUnderlay'
 import { SocketOverlay } from './SocketOverlay'
+import { CardOverlay } from './CardOverlay'
 
 interface Props {
   controllerRef: React.MutableRefObject<GraphController | null>
@@ -35,7 +36,10 @@ export function CytoscapeGraph({ controllerRef, filter, search, onSelect, onSele
   onSelectMultiRef.current = onSelectMulti
   onFocusNodeRef.current = onFocusNode
 
-  useEffect(() => {
+  // The graph controller must exist before the parent starts the websocket;
+  // otherwise a very fast localhost snapshot can arrive before there is a
+  // graph to receive it and every later event begins at (0, 0).
+  useLayoutEffect(() => {
     const wrapper = wrapperRef.current
     if (!wrapper) return
 
@@ -61,6 +65,7 @@ export function CytoscapeGraph({ controllerRef, filter, search, onSelect, onSele
     // paints the colored edge glow + zone headers BELOW the cards; the
     // socket overlay paints the connection ports ABOVE them.
     const underlay = new WireUnderlay(cy, wrapper, () => controller.getZones())
+    const cards = new CardOverlay(cy, wrapper)
     const sockets = new SocketOverlay(cy, wrapper)
     // exposed for acceptance testing / debugging
     ;(window as unknown as Record<string, unknown>).__esw_cy = cy
@@ -94,6 +99,7 @@ export function CytoscapeGraph({ controllerRef, filter, search, onSelect, onSele
 
     return () => {
       underlay.destroy()
+      cards.destroy()
       sockets.destroy()
       controller.destroy()
       controllerRef.current = null

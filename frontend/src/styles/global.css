@@ -210,6 +210,43 @@ body,
   gap: 3px;
 }
 
+.flow-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 82px;
+  padding: 2px 8px;
+  border: 1px solid var(--panel-edge);
+  background: rgba(8, 14, 22, 0.72);
+  color: #5c6c80;
+  font: 700 8px/1 var(--mono);
+  letter-spacing: 0.9px;
+  cursor: pointer;
+}
+
+.flow-btn.active {
+  border-color: rgba(52, 211, 153, 0.42);
+  color: #73e2b7;
+  background: rgba(52, 211, 153, 0.06);
+}
+
+.flow-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #566273;
+}
+
+.flow-btn.active .flow-dot {
+  background: #34d399;
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.9);
+  animation: flow-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes flow-status-pulse {
+  50% { opacity: 0.42; transform: scale(0.72); }
+}
+
 .icon-btn {
   background: transparent;
   border: 1px solid var(--panel-edge);
@@ -996,4 +1033,315 @@ body,
   border-top: 1px solid rgba(92, 107, 122, 0.3);
   padding-top: 3px;
   text-align: center;
+}
+
+/* ------------------------------------------------ reference map redesign */
+
+.app {
+  position: relative;
+  isolation: isolate;
+  background: #070b12;
+}
+
+/* The telemetry chrome floats over the topology, as in an operations map.
+   It stays fully functional without consuming a permanent canvas band. */
+.header {
+  position: absolute;
+  z-index: 50;
+  top: 10px;
+  left: 12px;
+  right: 12px;
+  min-height: 42px;
+  padding: 6px 10px;
+  border: 1px solid rgba(75, 94, 124, 0.48);
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgba(14, 21, 33, 0.94), rgba(8, 13, 22, 0.88));
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.35), inset 0 1px rgba(255, 255, 255, 0.025);
+  backdrop-filter: blur(16px);
+}
+
+.brand-name {
+  font-size: 13px;
+  letter-spacing: 2.2px;
+}
+
+.brand-sub {
+  color: #52617a;
+}
+
+.filterbar {
+  position: absolute;
+  z-index: 49;
+  top: 58px;
+  left: 12px;
+  right: 12px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid rgba(58, 75, 102, 0.4);
+  border-radius: 8px;
+  background: rgba(8, 13, 22, 0.82);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.26);
+  backdrop-filter: blur(14px);
+}
+
+.pill,
+.fit-btn,
+.icon-btn,
+.search {
+  border-radius: 4px;
+}
+
+.pill {
+  padding: 3px 9px;
+}
+
+.pill.active {
+  box-shadow: inset 0 0 14px rgba(34, 211, 238, 0.08), 0 0 12px rgba(34, 211, 238, 0.06);
+}
+
+.main {
+  flex: 1 1 100%;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-wrap {
+  overflow: hidden;
+}
+
+.graph-canvas {
+  background:
+    radial-gradient(circle at 50% 42%, rgba(27, 39, 62, 0.18), transparent 56%),
+    radial-gradient(circle, rgba(114, 137, 174, 0.14) 1px, transparent 1.25px),
+    #070b12;
+  background-size: auto, 20px 20px, auto;
+}
+
+.graph-canvas::after {
+  background:
+    linear-gradient(90deg, rgba(3, 6, 11, 0.48), transparent 11%, transparent 89%, rgba(3, 6, 11, 0.48)),
+    linear-gradient(180deg, rgba(3, 6, 11, 0.2), transparent 12%, transparent 88%, rgba(3, 6, 11, 0.52));
+}
+
+/* Rich cards aligned to the real Cytoscape nodes. */
+.graph-card-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.graph-card-layer[data-mode='compact'] {
+  display: none;
+}
+
+.graph-card {
+  --card-tone: #22d3ee;
+  --card-glow: rgba(34, 211, 238, 0.2);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 184px;
+  height: 64px;
+  transform-origin: center;
+  contain: layout style paint;
+  border: 1.4px solid color-mix(in srgb, var(--card-tone) 48%, #43516a);
+  border-radius: 9px;
+  background:
+    linear-gradient(100deg, color-mix(in srgb, var(--card-tone) 8%, transparent), transparent 38%),
+    linear-gradient(180deg, rgba(27, 36, 54, 0.97), rgba(18, 26, 41, 0.96));
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.46),
+    0 0 17px var(--card-glow),
+    inset 0 1px rgba(255, 255, 255, 0.04);
+  color: #8392aa;
+  font-family: var(--mono);
+  transition: opacity 180ms ease, filter 180ms ease, border-color 180ms ease;
+}
+
+.graph-card::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 34px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(90, 108, 139, 0.26), rgba(90, 108, 139, 0.08));
+}
+
+.graph-card[data-tone='blue'] { --card-tone: #38bdf8; --card-glow: rgba(56, 189, 248, 0.18); }
+.graph-card[data-tone='green'] { --card-tone: #34d399; --card-glow: rgba(52, 211, 153, 0.18); }
+.graph-card[data-tone='amber'] { --card-tone: #f59e0b; --card-glow: rgba(245, 158, 11, 0.18); }
+.graph-card[data-tone='magenta'] { --card-tone: #ec4899; --card-glow: rgba(236, 72, 153, 0.2); }
+.graph-card[data-tone='violet'] { --card-tone: #a855f7; --card-glow: rgba(168, 85, 247, 0.2); }
+.graph-card[data-tone='red'] { --card-tone: #fb5262; --card-glow: rgba(251, 82, 98, 0.2); }
+
+.graph-card-code {
+  position: absolute;
+  z-index: 2;
+  top: -13px;
+  left: 9px;
+  padding: 1px 5px;
+  border: 1px solid rgba(74, 91, 119, 0.6);
+  border-radius: 4px 4px 0 0;
+  background: rgba(12, 18, 29, 0.96);
+  color: #71819a;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+}
+
+.graph-card-icon {
+  position: absolute;
+  top: 10px;
+  left: 11px;
+  color: var(--card-tone);
+  font-size: 14px;
+  line-height: 1;
+  text-shadow: 0 0 10px var(--card-glow);
+}
+
+.graph-card-title {
+  position: absolute;
+  top: 9px;
+  left: 33px;
+  right: 48px;
+  overflow: hidden;
+  color: var(--card-tone);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 0 12px var(--card-glow);
+}
+
+.graph-card-metric {
+  position: absolute;
+  top: 12px;
+  right: 9px;
+  color: #91a0b6;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.graph-card-detail {
+  position: absolute;
+  z-index: 1;
+  left: 11px;
+  right: 20px;
+  bottom: 9px;
+  overflow: hidden;
+  color: #8190a8;
+  font-size: 8.5px;
+  line-height: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-card-state {
+  position: absolute;
+  z-index: 2;
+  right: 8px;
+  bottom: 8px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #42d77d;
+  box-shadow: 0 0 8px rgba(66, 215, 125, 0.8);
+}
+
+.graph-card.is-banked {
+  opacity: 0.68;
+  filter: saturate(0.72);
+}
+
+.graph-card.is-banked .graph-card-state {
+  background: #6e7c92;
+  box-shadow: none;
+}
+
+.graph-card.is-dim {
+  opacity: 0.14;
+  filter: saturate(0.4);
+}
+
+.graph-card.is-fading {
+  opacity: 0;
+}
+
+.graph-card.is-selected {
+  border-color: #dff8ff;
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.3), 0 0 28px rgba(34, 211, 238, 0.35);
+}
+
+.graph-card.is-benchmark {
+  border-style: dashed;
+}
+
+.graph-card.signal-source,
+.graph-card.signal-target {
+  z-index: 3;
+  border-color: var(--signal-color, #35e0ff);
+  filter: brightness(1.32) saturate(1.25);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--signal-color, #35e0ff) 28%, transparent),
+    0 0 32px color-mix(in srgb, var(--signal-color, #35e0ff) 58%, transparent),
+    inset 0 0 18px color-mix(in srgb, var(--signal-color, #35e0ff) 13%, transparent);
+  animation: graph-card-signal 520ms ease-out;
+}
+
+.graph-card.signal-target {
+  animation-duration: 720ms;
+}
+
+@keyframes graph-card-signal {
+  0% { opacity: 0.72; transform-origin: center; }
+  22% { opacity: 1; }
+  100% { opacity: 1; }
+}
+
+.hintbar,
+.drawer {
+  background: rgba(7, 11, 18, 0.9);
+  backdrop-filter: blur(12px);
+}
+
+@media (max-width: 1450px) {
+  .header .ai-summary,
+  .header .infra-summary,
+  .header .tel-chip {
+    display: none;
+  }
+
+  .header-right {
+    margin-left: auto;
+  }
+
+  .filterbar .search {
+    width: 145px;
+  }
+}
+
+@media (max-width: 920px) {
+  .brand-sub,
+  .filterbar .view-toggle,
+  .filterbar .search,
+  .header .stat-block.net,
+  .header .stat-block.meta {
+    display: none;
+  }
+
+  .header,
+  .filterbar {
+    left: 7px;
+    right: 7px;
+  }
+
+  .hintbar {
+    display: none;
+  }
 }

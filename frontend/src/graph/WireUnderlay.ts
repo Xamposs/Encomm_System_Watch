@@ -1,11 +1,9 @@
 import type { Core } from 'cytoscape'
 
 /**
- * v1.0.2 final pass — reference-fidelity wiring palette.
- * Technical meaning (never decoration): blue/cyan = normal system/process/
- * network, teal/green = active/live/healthy/resource, amber/orange =
- * services/infra/warnings, purple/magenta = AI/Hermes/provider-related.
- * Red appears ONLY on genuine abnormal/error/close events (stylesheet).
+ * Reference-fidelity wiring palette. Edge kind remains the source of truth;
+ * stable per-edge variants create the multicolour cable field while tooltips
+ * and the inspector retain the exact relationship semantics.
  */
 export const EDGE_KIND_COLORS: Record<string, string> = {
   LOCALHOST: '#4fd2f7',
@@ -25,6 +23,27 @@ export const EDGE_KIND_COLORS: Record<string, string> = {
   AI_CALL: '#a855f7',
 }
 export const DEFAULT_EDGE_COLOR = '#3f5a75'
+
+const EDGE_VARIANTS: Record<string, string[]> = {
+  LOCALHOST: ['#22d3ee', '#2dd4bf', '#38bdf8', '#ec4899', '#f97316', '#8b5cf6'],
+  LISTEN: ['#34d399', '#2dd4bf', '#84cc16'],
+  EXTERNAL: ['#38bdf8', '#06b6d4', '#f97316', '#ef4444', '#ec4899'],
+  PROCESS_PARENT: ['#a855f7', '#ec4899', '#7c3aed', '#3b82f6'],
+  SPAWNED: ['#c026d3', '#8b5cf6', '#ec4899'],
+  MEMBER_OF: ['#8b5cf6', '#d946ef', '#6366f1'],
+  HOSTS: ['#f97316', '#f59e0b', '#ef4444'],
+  HOSTED_BY: ['#f59e0b', '#fb7185', '#f97316'],
+  CONNECTED_TO: ['#64748b', '#38bdf8', '#14b8a6'],
+  AI_CALL: ['#ec4899', '#d946ef', '#8b5cf6'],
+}
+
+function renderedEdgeColor(kind: string, id: string): string {
+  const variants = EDGE_VARIANTS[kind]
+  if (!variants?.length) return EDGE_KIND_COLORS[kind] ?? DEFAULT_EDGE_COLOR
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
+  return variants[Math.abs(h) % variants.length]
+}
 
 /** One semantic composition zone (model space), drawn by the underlay. */
 export interface ZoneInfo {
@@ -54,6 +73,8 @@ export class WireUnderlay {
   private ro: ResizeObserver
   private cssW = 1
   private cssH = 1
+  private lastDraw = 0
+  private drawTimer: number | undefined
 
   constructor(
     private cy: Core,
@@ -70,8 +91,11 @@ export class WireUnderlay {
     this.ctx = ctx
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
+    container.addEventListener('esw:layout', this.requestDraw)
     this.resize()
-    cy.on('render', this.requestDraw)
+    cy.on('pan zoom resize', this.requestDraw)
+    cy.on('position', 'node', this.requestDraw)
+    cy.on('add remove', 'edge', this.requestDraw)
     cy.on('destroy', this.onDestroy)
     this.requestDraw()
   }
@@ -96,12 +120,20 @@ export class WireUnderlay {
   }
 
   private requestDraw = (): void => {
-    if (this.destroyed) return
-    if (this.raf) return
-    this.raf = requestAnimationFrame(() => {
-      this.raf = 0
-      this.draw()
-    })
+    if (this.destroyed || this.raf || this.drawTimer !== undefined) return
+    // Decorative wire glow is intentionally capped at 20 fps. Geometry and
+    // hit-testing remain native Cytoscape; this pass never needs 60 redraws/s.
+    const wait = Math.max(0, 50 - (performance.now() - this.lastDraw))
+    const schedule = (): void => {
+      this.drawTimer = undefined
+      this.raf = requestAnimationFrame(() => {
+        this.raf = 0
+        this.lastDraw = performance.now()
+        this.draw()
+      })
+    }
+    if (wait > 1) this.drawTimer = window.setTimeout(schedule, wait)
+    else schedule()
   }
 
   /** First control point of the rendered curve (quadratic bezier). */
@@ -136,17 +168,22 @@ export class WireUnderlay {
     if (edges.length <= 2600) {
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
-      for (const e of edges) {
+      // At FIT ALL, painting every glow twice costs far more than the tiny
+      // sub-pixel result. Keep a stable representative wire field instead.
+      const target = zoom < 0.36 ? 520 : 1800
+      const stride = Math.max(1, Math.ceil(edges.length / target))
+      for (let i = 0; i < edges.length; i += stride) {
+        const e = edges[i]
         const kind = String(e.data('kind') ?? '')
-        const color = EDGE_KIND_COLORS[kind] ?? DEFAULT_EDGE_COLOR
-        let alpha = 0.17
+        const color = renderedEdgeColor(kind, e.id())
+        let alpha = 0.28
         if (e.hasClass('ai-dim')) alpha *= 0.22
         if (e.hasClass('fading')) continue // closed-connection fade: no glow
         const s = e.sourceEndpoint()
         const t = e.targetEndpoint()
         if (!s || !t || typeof s.x !== 'number' || typeof t.x !== 'number') continue
         const cp = this.controlPointOf(e)
-        const w = Math.max(3.0, 4.6 * zoom)
+        const w = Math.max(2.4, 4.2 * zoom)
         ctx.strokeStyle = color
         ctx.globalAlpha = alpha
         ctx.lineWidth = w
@@ -156,8 +193,8 @@ export class WireUnderlay {
         else ctx.lineTo(toX(t.x), toY(t.y))
         ctx.stroke()
         // inner brighter pass -> soft neon falloff
-        ctx.globalAlpha = alpha * 0.95
-        ctx.lineWidth = Math.max(1.5, 2.2 * zoom)
+        ctx.globalAlpha = Math.min(0.78, alpha * 2.1)
+        ctx.lineWidth = Math.max(0.9, 1.45 * zoom)
         ctx.stroke()
       }
       ctx.globalAlpha = 1
@@ -172,15 +209,15 @@ export class WireUnderlay {
       if (w < 70) continue // far-out: skip micro zones
       if (y < -34 || y > this.cssH + 34) continue
       // thin rule under the label
-      ctx.strokeStyle = 'rgba(126,154,186,0.18)'
+      ctx.strokeStyle = 'rgba(111,139,180,0.24)'
       ctx.lineWidth = 1
       ctx.beginPath()
       ctx.moveTo(x0, y + 12)
       ctx.lineTo(x1, y + 12)
       ctx.stroke()
       // label
-      ctx.font = '12px Consolas, "Cascadia Mono", monospace'
-      ctx.fillStyle = 'rgba(150,174,202,0.46)'
+      ctx.font = '600 13px Consolas, "Cascadia Mono", monospace'
+      ctx.fillStyle = 'rgba(139,161,196,0.58)'
       try {
         ;(ctx as unknown as { letterSpacing: string }).letterSpacing = '3px'
       } catch { /* older engines */ }
@@ -193,7 +230,13 @@ export class WireUnderlay {
 
   destroy(): void {
     this.destroyed = true
+    if (this.raf) cancelAnimationFrame(this.raf)
+    if (this.drawTimer !== undefined) window.clearTimeout(this.drawTimer)
     this.ro.disconnect()
+    this.cy.off('pan zoom resize', this.requestDraw)
+    this.cy.off('position', 'node', this.requestDraw)
+    this.cy.off('add remove', 'edge', this.requestDraw)
+    this.canvas.parentElement?.removeEventListener('esw:layout', this.requestDraw)
     this.canvas.remove()
   }
 }
