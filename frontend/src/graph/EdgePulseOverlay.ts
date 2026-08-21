@@ -7,6 +7,7 @@ interface Pulse {
   start: number
   dur: number
   kind: PulseKind
+  targetId?: string
 }
 
 /** One traveling particle caused by ACTUAL observed bytes. */
@@ -109,6 +110,7 @@ export class EdgePulseOverlay {
   private pulses = new Map<string, Pulse>()
   private recent = new Map<string, number>()
   private activity = new Map<string, EdgeActivity>()
+  private activityOrder: string[] = []
   private particles: DataParticle[] = []
   // ---- application-level AI signals (v0.5.0) --------------------------
   // Distinct lane from DATA particles: AI signals are proven application
@@ -121,11 +123,13 @@ export class EdgePulseOverlay {
   private raf = 0
   private stops = 0
   private testMuted = false
+  private enabled = true
+  private signalTimers = new Map<string, number>()
   private ro: ResizeObserver
 
   constructor(
     private cy: Core,
-    container: HTMLElement,
+    private container: HTMLElement,
   ) {
     this.canvas = document.createElement('canvas')
     this.canvas.style.cssText =
@@ -154,13 +158,21 @@ export class EdgePulseOverlay {
   // ------------------------------------------------------ lifecycle pulses
 
   pulse(edgeId: string, kind: PulseKind): void {
-    if (this.testMuted) return
+    if (this.testMuted || !this.enabled) return
+    const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
+    const targetId = edge.length > 0 && !edge.removed() ? edge.target().id() : undefined
     if (this.pulses.has(edgeId)) this.pulses.delete(edgeId)
     this.pulses.set(edgeId, {
       start: performance.now(),
       dur: kind === 'close' ? 650 : 550,
       kind,
+      targetId,
     })
+    if (edge.length > 0 && !edge.removed()) {
+      const color = PULSE_COLORS[kind]
+      this.emitSignal(edge, 'source', 1, color)
+      this.lightCable(edge, color, kind === 'close' ? 720 : 620)
+    }
     while (this.pulses.size > MAX_PULSES) {
       const first = this.pulses.keys().next().value as string | undefined
       if (first === undefined) break
@@ -171,7 +183,7 @@ export class EdgePulseOverlay {
   }
 
   markRecent(edgeId: string, ms: number): void {
-    if (this.testMuted) return
+    if (this.testMuted || !this.enabled) return
     this.recent.set(edgeId, performance.now() + ms)
     while (this.recent.size > MAX_RECENT) {
       const first = this.recent.keys().next().value as string | undefined
@@ -187,6 +199,7 @@ export class EdgePulseOverlay {
    * ``synthetic`` marks TEST-ONLY injected activity (benchmark mode only)
    * so it can never be confused with real observed bytes. */
   applyActivity(items: NetworkActivityItem[], synthetic = false): void {
+    if (this.testMuted || !this.enabled) return
     const now = performance.now()
     const touched = new Set<string>()
     for (const it of items) {
@@ -213,6 +226,9 @@ export class EdgePulseOverlay {
       )
       this.activity = new Map(sorted.slice(0, MAX_ACTIVITY_EDGES))
     }
+    this.activityOrder = [...this.activity.entries()]
+      .sort((a, b) => b[1].level - a[1].level || b[1].lastActivity - a[1].lastActivity)
+      .map(([edgeId]) => edgeId)
     if (items.length > 0) this.ensureRunning()
   }
 
@@ -221,7 +237,7 @@ export class EdgePulseOverlay {
   // ai_activity WS message). testOnly signals (TEST/FIXTURE/SYNTHETIC) get a
   // distinct color so fixture data can never be mistaken for real AI work.
   applyAiSignals(items: { edge_id: string; test_only?: boolean }[]): void {
-    if (this.testMuted) return
+    if (this.testMuted || !this.enabled) return
     const now = performance.now()
     const touched = new Set<string>()
     for (const it of items) {
@@ -251,7 +267,8 @@ export class EdgePulseOverlay {
     if (edge.length === 0 || edge.removed()) return
     const own = this.aiParticles.filter((p) => p.edgeId === edgeId)
     if (own.length >= AI_PER_EDGE_CAP) return
-    if (this.aiParticles.length >= MAX_AI_PARTICLES) return
+    if (this.aiParticles.length >= this.aiParticleBudget()) return
+    const color = st.testOnly ? AI_SIGNAL_TEST_COLOR : AI_SIGNAL_COLOR
     this.aiParticles.push({
       edgeId,
       t: 0,
@@ -260,6 +277,8 @@ export class EdgePulseOverlay {
       born: performance.now(),
       testOnly: Boolean(st.testOnly),
     })
+    this.emitSignal(edge, 'source', 1, color)
+    this.lightCable(edge, color, 1050)
   }
 
   private spawnParticle(edgeId: string, st: EdgeActivity): void {
@@ -267,7 +286,7 @@ export class EdgePulseOverlay {
     if (edge.length === 0 || edge.removed()) return
     const own = this.particles.filter((p) => p.edgeId === edgeId)
     if (own.length >= (PER_EDGE_CAP[st.level] ?? 2)) return
-    if (this.particles.length >= MAX_PARTICLES) return
+    if (this.particles.length >= this.dataParticleBudget()) return
     const total = st.fwdBps + st.revBps
     if (total <= 0) return
     // weighted direction: whichever direction actually carries bytes
@@ -281,13 +300,65 @@ export class EdgePulseOverlay {
       size: 1.6 + Math.min(1.4, Math.sqrt(st.level) * 0.5),
       born: performance.now(),
     })
+    const color = dir === 1 ? FWD_COLOR : REV_COLOR
+    this.emitSignal(edge, 'source', dir, color)
+    this.lightCable(edge, color, dur + 160)
   }
 
   private ensureRunning(): void {
-    if (!this.running) {
+    if (this.enabled && !this.running) {
       this.running = true
       this.loop()
     }
+  }
+
+  private dataParticleBudget(): number {
+    return this.cy.zoom() < 0.36 ? 36 : MAX_PARTICLES
+  }
+
+  private aiParticleBudget(): number {
+    return this.cy.zoom() < 0.36 ? 8 : MAX_AI_PARTICLES
+  }
+
+  private clearSignalTimer(key: string): void {
+    const timer = this.signalTimers.get(key)
+    if (timer !== undefined) window.clearTimeout(timer)
+    this.signalTimers.delete(key)
+  }
+
+  private emitNodeSignal(nodeId: string, phase: 'source' | 'target', color: string): void {
+    const node = this.cy.getElementById(nodeId)
+    if (!node.length || node.removed()) return
+    const className = phase === 'source' ? 'signal-source' : 'signal-target'
+    const key = `node:${nodeId}:${className}`
+    this.clearSignalTimer(key)
+    node.addClass(className)
+    this.container.dispatchEvent(new CustomEvent('esw:signal', {
+      detail: { nodeId, phase, color },
+    }))
+    this.signalTimers.set(key, window.setTimeout(() => {
+      const current = this.cy.getElementById(nodeId)
+      if (current.length) current.removeClass(className)
+      this.signalTimers.delete(key)
+    }, phase === 'source' ? 460 : 680))
+  }
+
+  private emitSignal(edge: EdgeSingular, phase: 'source' | 'target', dir: 1 | -1, color: string): void {
+    const source = dir === 1 ? edge.source() : edge.target()
+    const target = dir === 1 ? edge.target() : edge.source()
+    this.emitNodeSignal((phase === 'source' ? source : target).id(), phase, color)
+  }
+
+  private lightCable(edge: EdgeSingular, _color: string, duration: number): void {
+    const edgeId = edge.id()
+    const key = `edge:${edgeId}`
+    this.clearSignalTimer(key)
+    edge.addClass('signal-live')
+    this.signalTimers.set(key, window.setTimeout(() => {
+      const current = this.cy.getElementById(edgeId)
+      if (current.length) current.removeClass('signal-live')
+      this.signalTimers.delete(key)
+    }, duration))
   }
 
   private toRender(p: { x: number; y: number }): { x: number; y: number } {
@@ -304,7 +375,41 @@ export class EdgePulseOverlay {
     const s = edge.sourceEndpoint()
     const e = edge.targetEndpoint()
     if (!s || !e || typeof s.x !== 'number' || typeof e.x !== 'number') return null
-    return { x: s.x + (e.x - s.x) * t, y: s.y + (e.y - s.y) * t }
+    let cp: { x: number; y: number } | null = null
+    try {
+      const cps = edge.controlPoints() as unknown as Array<{ x: number; y: number }>
+      if (cps?.length && Number.isFinite(cps[0]?.x) && Number.isFinite(cps[0]?.y)) cp = cps[0]
+    } catch { /* straight edge / hidden endpoint */ }
+    if (!cp) return { x: s.x + (e.x - s.x) * t, y: s.y + (e.y - s.y) * t }
+    const u = 1 - t
+    return {
+      x: u * u * s.x + 2 * u * t * cp.x + t * t * e.x,
+      y: u * u * s.y + 2 * u * t * cp.y + t * t * e.y,
+    }
+  }
+
+  /** Bright segment behind a particle: this is the cable itself lighting up,
+   * sampled on the same real Cytoscape curve as the moving signal. */
+  private strokeTrail(edge: EdgeSingular, from: number, to: number, color: string, width: number): void {
+    const ctx = this.ctx
+    const steps = 7
+    ctx.save()
+    ctx.strokeStyle = color
+    ctx.globalAlpha = 0.52
+    ctx.lineWidth = width
+    ctx.lineCap = 'round'
+    ctx.shadowColor = color
+    ctx.shadowBlur = 8
+    ctx.beginPath()
+    for (let i = 0; i <= steps; i++) {
+      const pt = this.pointOn(edge, from + (to - from) * (i / steps))
+      if (!pt) continue
+      const p = this.toRender(pt)
+      if (i === 0) ctx.moveTo(p.x, p.y)
+      else ctx.lineTo(p.x, p.y)
+    }
+    ctx.stroke()
+    ctx.restore()
   }
 
   private loop = (): void => {
@@ -320,23 +425,23 @@ export class EdgePulseOverlay {
     for (const [edgeId, st] of this.activity) {
       if (now - st.lastActivity > RECENT_MS) this.activity.delete(edgeId)
     }
+    this.activityOrder = this.activityOrder.filter((edgeId) => this.activity.has(edgeId))
 
     // spawn data particles for ACTIVE edges (actual observed traffic).
     // Prioritized: strongest level + most recent activity spawn first, so
     // when the global particle budget is exhausted the loudest/recent edges
     // keep their particles and quiet ones wait their turn.
-    const spawnOrder = [...this.activity.entries()].sort((a, b) => {
-      if (b[1].level !== a[1].level) return b[1].level - a[1].level
-      return b[1].lastActivity - a[1].lastActivity
-    })
-    for (const [edgeId, st] of spawnOrder) {
+    const dataBudget = this.dataParticleBudget()
+    for (const edgeId of this.activityOrder) {
+      const st = this.activity.get(edgeId)
+      if (!st) continue
       const age = now - st.lastActivity
       if (age >= ACTIVE_MS) continue
       const interval = SPAWN_INTERVAL[st.level] ?? 1600
       if (now - st.lastSpawn >= interval) {
         st.lastSpawn = now
         this.spawnParticle(edgeId, st)
-        if (this.particles.length >= MAX_PARTICLES) break
+        if (this.particles.length >= dataBudget) break
       }
     }
 
@@ -348,6 +453,7 @@ export class EdgePulseOverlay {
       // a particle in flight may finish its travel even as decay sets in
       p.t = Math.min(1, (now - p.born) / p.dur)
       if (p.t < 1) alive.push(p)
+      else this.emitSignal(edge, 'target', p.dir, p.dir === 1 ? FWD_COLOR : REV_COLOR)
     }
     this.particles = alive
 
@@ -360,7 +466,7 @@ export class EdgePulseOverlay {
       if (now - st.lastSpawn >= AI_SPAWN_INTERVAL_MS) {
         st.lastSpawn = now
         this.spawnAiParticle(edgeId, st)
-        if (this.aiParticles.length >= MAX_AI_PARTICLES) break
+        if (this.aiParticles.length >= this.aiParticleBudget()) break
       }
     }
     const aiAlive: AiParticle[] = []
@@ -369,6 +475,7 @@ export class EdgePulseOverlay {
       if (edge.length === 0 || edge.removed()) continue
       p.t = Math.min(1, (now - p.born) / p.dur)
       if (p.t < 1) aiAlive.push(p)
+      else this.emitSignal(edge, 'target', 1, p.testOnly ? AI_SIGNAL_TEST_COLOR : AI_SIGNAL_COLOR)
     }
     this.aiParticles = aiAlive
 
@@ -402,7 +509,10 @@ export class EdgePulseOverlay {
       const age = now - st.lastActivity
       if (age >= ACTIVE_MS && age < RECENT_MS) slowDots.add(edgeId)
     }
+    const slowDotBudget = this.cy.zoom() < 0.36 ? 16 : 60
+    let slowDotCount = 0
     for (const edgeId of slowDots) {
+      if (slowDotCount++ >= slowDotBudget) break
       const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
       if (edge.length === 0 || edge.removed()) continue
       const t = (now % 2600) / 2600
@@ -424,6 +534,9 @@ export class EdgePulseOverlay {
       if (!pt) continue
       const head = this.toRender(pt)
       const color = p.dir === 1 ? FWD_COLOR : REV_COLOR
+      const trailEnd = p.dir === 1 ? headT : Math.min(1, headT + 0.24)
+      const trailStart = p.dir === 1 ? Math.max(0, headT - 0.24) : headT
+      this.strokeTrail(edge, trailStart, trailEnd, color, Math.max(1.2, 2.4 * zoom))
       ctx.save()
       ctx.shadowColor = color
       ctx.shadowBlur = 8 * zoom
@@ -456,6 +569,7 @@ export class EdgePulseOverlay {
       if (!pt) continue
       const head = this.toRender(pt)
       const color = p.testOnly ? AI_SIGNAL_TEST_COLOR : AI_SIGNAL_COLOR
+      this.strokeTrail(edge, Math.max(0, p.t - 0.22), p.t, color, Math.max(1.2, 2.3 * zoom))
       ctx.save()
       ctx.shadowColor = color
       ctx.shadowBlur = 10 * zoom
@@ -492,6 +606,7 @@ export class EdgePulseOverlay {
       const t = (now - pulse.start) / pulse.dur
       if (t >= 1) {
         this.pulses.delete(edgeId)
+        if (pulse.targetId) this.emitNodeSignal(pulse.targetId, 'target', PULSE_COLORS[pulse.kind])
         continue
       }
       const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
@@ -503,6 +618,7 @@ export class EdgePulseOverlay {
       const pt = this.pointOn(edge, t)
       if (!pt) continue
       const head = this.toRender(pt)
+      this.strokeTrail(edge, Math.max(0, t - 0.28), t, color, Math.max(1.4, 2.8 * zoom))
       ctx.save()
       ctx.shadowColor = color
       ctx.shadowBlur = 10 * zoom
@@ -528,8 +644,30 @@ export class EdgePulseOverlay {
     }
   }
 
-  destroy(): void {
+  setEnabled(on: boolean): void {
+    if (this.enabled === on) return
+    this.enabled = on
+    this.container.classList.toggle('flow-disabled', !on)
+    if (on) return
     cancelAnimationFrame(this.raf)
+    this.running = false
+    this.activity.clear()
+    this.activityOrder = []
+    this.particles = []
+    this.pulses.clear()
+    this.recent.clear()
+    this.aiSignals.clear()
+    this.aiParticles = []
+    for (const timer of this.signalTimers.values()) window.clearTimeout(timer)
+    this.signalTimers.clear()
+    this.cy.$('node.signal-source, node.signal-target').removeClass('signal-source signal-target')
+    this.cy.$('edge.signal-live').removeClass('signal-live')
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+  }
+
+  destroy(): void {
+    if (this.enabled) this.setEnabled(false)
+    else cancelAnimationFrame(this.raf)
     this.ro.disconnect()
     this.canvas.remove()
   }
@@ -543,6 +681,7 @@ export class EdgePulseOverlay {
    */
   testForceIdle(): void {
     this.activity.clear()
+    this.activityOrder = []
     this.particles = []
     this.pulses.clear()
     this.recent.clear()
@@ -562,6 +701,7 @@ export class EdgePulseOverlay {
     this.testMuted = muted
     if (!muted) return
     this.activity.clear()
+    this.activityOrder = []
     this.particles = []
     this.pulses.clear()
     this.recent.clear()

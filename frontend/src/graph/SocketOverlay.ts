@@ -47,17 +47,19 @@ export class SocketOverlay {
   ) {
     this.canvas = document.createElement('canvas')
     this.canvas.style.cssText =
-      'position:absolute;inset:0;pointer-events:none;z-index:11;'
+      'position:absolute;inset:0;pointer-events:none;z-index:14;'
     container.appendChild(this.canvas)
     const ctx = this.canvas.getContext('2d')
     if (!ctx) throw new Error('canvas 2d unavailable')
     this.ctx = ctx
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
+    container.addEventListener('esw:layout', this.requestDraw)
     this.resize()
-    cy.on('render', this.requestDraw)
+    cy.on('pan zoom resize', this.requestDraw)
+    cy.on('position', 'node', this.requestDraw)
     // topology changes invalidate the per-node dominant-kind cache
-    cy.on('add remove data', this.onTopologyChange)
+    cy.on('add remove', 'edge', this.onTopologyChange)
     cy.on('destroy', this.onDestroy)
     this.requestDraw()
   }
@@ -139,13 +141,13 @@ export class SocketOverlay {
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.cssW, this.cssH)
     const zoom = cy.zoom()
-    if (zoom < 0.12) return // way out: dots are sub-pixel noise
+    if (zoom < 0.36) return // compact canvas nodes do not need HTML-card sockets
     const nodes = cy.nodes(':visible')
     if (nodes.length === 0 || nodes.length > 3000) return
     if (this.cacheDirty) this.rebuildCache()
     const pan = cy.pan()
-    const r = Math.max(1.6, 2.4 * zoom)
-    ctx.lineWidth = Math.max(1, 1.15 * Math.min(1, zoom))
+    const r = Math.max(2.2, 4.4 * zoom)
+    ctx.lineWidth = Math.max(1.1, 1.4 * Math.min(1, zoom))
     for (const nd of nodes) {
       const info = this.colorCache.get(nd.id())
       if (!info) continue
@@ -159,6 +161,8 @@ export class SocketOverlay {
       const sx = xl * zoom + pan.x
       const sy = y * zoom + pan.y
       const ex = xr * zoom + pan.x
+      if (sy < -12 || sy > this.cssH + 12) continue
+      if ((sx < -12 && ex < -12) || (sx > this.cssW + 12 && ex > this.cssW + 12)) continue
       // dark inset + colored ring (connection port)
       ctx.fillStyle = 'rgba(8,12,18,0.92)'
       ctx.strokeStyle = info
@@ -176,6 +180,10 @@ export class SocketOverlay {
   destroy(): void {
     this.destroyed = true
     this.ro.disconnect()
+    this.cy.off('pan zoom resize', this.requestDraw)
+    this.cy.off('position', 'node', this.requestDraw)
+    this.cy.off('add remove', 'edge', this.onTopologyChange)
+    this.canvas.parentElement?.removeEventListener('esw:layout', this.requestDraw)
     this.canvas.remove()
   }
 }

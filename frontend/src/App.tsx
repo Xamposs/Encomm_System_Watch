@@ -22,6 +22,7 @@ export default function App() {
   const [focusNode, setFocusNode] = useState<string | null>(null)
   const [focusHops, setFocusHops] = useState(1)
   const [selectionCount, setSelectionCount] = useState(0)
+  const [signalsEnabled, setSignalsEnabled] = useState(true)
 
   const applyFocus = (id: string | null, hops = focusHops) => {
     setFocusNode(id)
@@ -74,6 +75,11 @@ export default function App() {
           controllerRef.current?.clearSelection()
           setSelectionCount(0)
           selectNode(null)
+        }}
+        signalsEnabled={signalsEnabled}
+        onSignals={(on) => {
+          setSignalsEnabled(on)
+          controllerRef.current?.setSignalAnimations(on)
         }}
       />
 

@@ -24,12 +24,15 @@ interface Props {
   onFocusExit: () => void
   selectionCount: number
   onClearSelection: () => void
+  signalsEnabled: boolean
+  onSignals: (on: boolean) => void
 }
 
 export function FilterBar({
   filter, onFilter, search, onSearch, onFit, onRelayout, onZoomIn, onZoomOut,
   viewMode, onViewMode, focusNode, focusHops,
   onFocusHops, onFocusExit, selectionCount, onClearSelection,
+  signalsEnabled, onSignals,
 }: Props) {
   return (
     <div className="filterbar">
@@ -95,6 +98,14 @@ export function FilterBar({
         </div>
       )}
       <div className="view-controls">
+        <button
+          className={`flow-btn ${signalsEnabled ? 'active' : ''}`}
+          title="Animate real observed activity: source → cable → destination"
+          aria-pressed={signalsEnabled}
+          onClick={() => onSignals(!signalsEnabled)}
+        >
+          <span className="flow-dot" /> LIVE FLOW
+        </button>
         <button className="icon-btn" title="Zoom out" onClick={onZoomOut}>−</button>
         <button className="icon-btn" title="Zoom in" onClick={onZoomIn}>+</button>
         <button className="fit-btn" title="Re-run the layout (large graphs settle after big changes)" onClick={onRelayout}>RELAYOUT</button>
