@@ -1,0 +1,181 @@
+import type { Core } from 'cytoscape'
+import { DEFAULT_EDGE_COLOR, EDGE_KIND_COLORS } from './WireUnderlay'
+
+/** Tie-break order for a node's dominant edge kind (socket color). */
+const SOCKET_PRIORITY = [
+  'EXTERNAL',
+  'LOCALHOST',
+  'HOSTS',
+  'HOSTED_BY',
+  'LISTEN',
+  'USES_GPU',
+  'SERVES_MODEL',
+  'AI_CALL',
+  'LOCAL_API',
+  'SPAWNED',
+  'MEMBER_OF',
+  'BACKED_BY',
+  'EXPOSES',
+  'CONNECTED_TO',
+  'PROCESS_PARENT',
+]
+
+/**
+ * Top connection-socket canvas (v1.0.2 final pass).
+ *
+ * Draws small circular "ports" on the left/right border midpoint of every
+ * node with incident edges — the reference-style connection points that
+ * make cards read as connected modules. Socket color = dominant incident
+ * edge kind (real relationships only). Redraws on cytoscape render events,
+ * rAF-throttled; skips nodes with no edges, hidden/dimmed elements, and
+ * very large graphs (defensive cap).
+ */
+export class SocketOverlay {
+  private canvas: HTMLCanvasElement
+  private ctx: CanvasRenderingContext2D
+  private raf = 0
+  private destroyed = false
+  private ro: ResizeObserver
+  private cssW = 1
+  private cssH = 1
+  private colorCache = new Map<string, string>()
+  private cacheDirty = true
+
+  constructor(
+    private cy: Core,
+    container: HTMLElement,
+  ) {
+    this.canvas = document.createElement('canvas')
+    this.canvas.style.cssText =
+      'position:absolute;inset:0;pointer-events:none;z-index:11;'
+    container.appendChild(this.canvas)
+    const ctx = this.canvas.getContext('2d')
+    if (!ctx) throw new Error('canvas 2d unavailable')
+    this.ctx = ctx
+    this.ro = new ResizeObserver(() => this.resize())
+    this.ro.observe(container)
+    this.resize()
+    cy.on('render', this.requestDraw)
+    // topology changes invalidate the per-node dominant-kind cache
+    cy.on('add remove data', this.onTopologyChange)
+    cy.on('destroy', this.onDestroy)
+    this.requestDraw()
+  }
+
+  private onDestroy = (): void => {
+    this.destroyed = true
+  }
+
+  private onTopologyChange = (): void => {
+    this.cacheDirty = true
+    this.requestDraw()
+  }
+
+  private resize(): void {
+    const parent = this.canvas.parentElement
+    if (!parent) return
+    const rect = parent.getBoundingClientRect()
+    const dpr = window.devicePixelRatio || 1
+    this.cssW = Math.max(1, rect.width)
+    this.cssH = Math.max(1, rect.height)
+    this.canvas.style.width = `${rect.width}px`
+    this.canvas.style.height = `${rect.height}px`
+    this.canvas.width = Math.max(1, Math.round(rect.width * dpr))
+    this.canvas.height = Math.max(1, Math.round(rect.height * dpr))
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    this.requestDraw()
+  }
+
+  private requestDraw = (): void => {
+    if (this.destroyed) return
+    if (this.raf) return
+    this.raf = requestAnimationFrame(() => {
+      this.raf = 0
+      this.draw()
+    })
+  }
+
+  /** Rebuild nodeId -> dominant incident edge kind color. */
+  private rebuildCache(): void {
+    this.colorCache.clear()
+    const cy = this.cy
+    const counts = new Map<string, Map<string, number>>()
+    for (const e of cy.edges(':visible')) {
+      let kind = String(e.data('kind') ?? '')
+      if (!EDGE_KIND_COLORS[kind]) kind = ''
+      try {
+        const s = e.source().id()
+        const t = e.target().id()
+        if (!s || !t) continue
+        let m = counts.get(s)
+        if (!m) counts.set(s, (m = new Map()))
+        m.set(kind, (m.get(kind) ?? 0) + 1)
+        let m2 = counts.get(t)
+        if (!m2) counts.set(t, (m2 = new Map()))
+        m2.set(kind, (m2.get(kind) ?? 0) + 1)
+      } catch {
+        /* dangling edge — ignore */
+      }
+    }
+    for (const nd of cy.nodes(':visible')) {
+      const m = counts.get(nd.id())
+      if (!m || m.size === 0) continue
+      let bestKind = ''
+      let best = 0
+      for (const k of SOCKET_PRIORITY) {
+        const c = m.get(k) ?? 0
+        if (c > best) {
+          best = c
+          bestKind = k
+        }
+      }
+      this.colorCache.set(nd.id(), EDGE_KIND_COLORS[bestKind] ?? DEFAULT_EDGE_COLOR)
+    }
+    this.cacheDirty = false
+  }
+
+  private draw(): void {
+    const cy = this.cy
+    const ctx = this.ctx
+    ctx.clearRect(0, 0, this.cssW, this.cssH)
+    const zoom = cy.zoom()
+    if (zoom < 0.12) return // way out: dots are sub-pixel noise
+    const nodes = cy.nodes(':visible')
+    if (nodes.length === 0 || nodes.length > 3000) return
+    if (this.cacheDirty) this.rebuildCache()
+    const pan = cy.pan()
+    const r = Math.max(1.6, 2.4 * zoom)
+    ctx.lineWidth = Math.max(1, 1.15 * Math.min(1, zoom))
+    for (const nd of nodes) {
+      const info = this.colorCache.get(nd.id())
+      if (!info) continue
+      if (nd.hasClass('ai-dim') || nd.hasClass('focus-dim')) continue
+      if (nd.hasClass('fading')) continue
+      const p = nd.position()
+      const hw = (nd.width() as number) / 2
+      const xl = p.x - hw + 1
+      const xr = p.x + hw - 1
+      const y = p.y
+      const sx = xl * zoom + pan.x
+      const sy = y * zoom + pan.y
+      const ex = xr * zoom + pan.x
+      // dark inset + colored ring (connection port)
+      ctx.fillStyle = 'rgba(8,12,18,0.92)'
+      ctx.strokeStyle = info
+      ctx.beginPath()
+      ctx.arc(sx, sy, r, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.arc(ex, sy, r, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+    }
+  }
+
+  destroy(): void {
+    this.destroyed = true
+    this.ro.disconnect()
+    this.canvas.remove()
+  }
+}

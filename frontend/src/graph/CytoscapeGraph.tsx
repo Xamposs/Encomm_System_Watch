@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react'
 import cytoscape from 'cytoscape'
 import type { Filter } from '../types/system'
 import { GraphController, STYLESHEET } from './GraphController'
+import { WireUnderlay } from './WireUnderlay'
+import { SocketOverlay } from './SocketOverlay'
 
 interface Props {
   controllerRef: React.MutableRefObject<GraphController | null>
@@ -55,6 +57,11 @@ export function CytoscapeGraph({ controllerRef, filter, search, onSelect, onSele
     })
     const controller = new GraphController(cy, wrapper)
     controllerRef.current = controller
+    // reference-fidelity canvases (v1.0.2 final pass): the wire underlay
+    // paints the colored edge glow + zone headers BELOW the cards; the
+    // socket overlay paints the connection ports ABOVE them.
+    const underlay = new WireUnderlay(cy, wrapper, () => controller.getZones())
+    const sockets = new SocketOverlay(cy, wrapper)
     // exposed for acceptance testing / debugging
     ;(window as unknown as Record<string, unknown>).__esw_cy = cy
     ;(window as unknown as Record<string, unknown>).__esw_controller = controller
@@ -86,6 +93,8 @@ export function CytoscapeGraph({ controllerRef, filter, search, onSelect, onSele
     controller.initShiftBoxSelection()
 
     return () => {
+      underlay.destroy()
+      sockets.destroy()
       controller.destroy()
       controllerRef.current = null
       cy.destroy()

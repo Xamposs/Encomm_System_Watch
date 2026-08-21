@@ -45,6 +45,33 @@ remain fully clickable/inspectable).
   (edge present before its endpoint nodes land) — the rack can no longer
   silently fall back to a scatter layout on live churn.
 
+### Final reference-style visual pass (frontend-only)
+- **Semantic zone composition** — the continuous rack is now four labeled
+  semantic zones with visible gaps (`HOSTS · SEMANTIC · INFRA`,
+  `CONNECTED CORE`, `SERVICES · UNLINKED`, `PROCESSES · UNLINKED`), so the
+  map reads as large regions with internal structure instead of one even
+  grid. Rows-per-column is solved per viewport aspect (zone gaps included).
+- **Organized chaos** — per-column stagger, stronger deterministic jitter
+  and a gentle lean break the perfect vertical alignment while keeping the
+  racks stable (no overlap inside a column, fully deterministic).
+- **Wire underlay canvas** — a soft colored glow follows every real
+  rendered edge curve BEHIND the cards (the reference "wiring field"), plus
+  faint uppercase zone headers drawn on the map. Zero synthetic edges; the
+  glow hugs the exact rendered bezier via `edge.controlPoints()`.
+- **Connection-socket overlay** — small circular ports on each connected
+  node's left/right border midpoint, colored by the dominant incident edge
+  kind (real relationships only).
+- **Reference-fidelity multicolor palette** — cyan/blue = normal
+  system/process/network, teal/green = active/live/resource, amber/orange =
+  services/infra/warnings, purple/magenta = AI/Hermes/provider, red =
+  genuine abnormal/close only (never decorative). Base edge width/opacity
+  and arrow scale raised; longer lane-aware arcs for cross-screen drama.
+- **Premium card refresh** — brighter fills, crisp borders, larger
+  PROCESS/SYSTEM cards; `svc-bank`/`orphan-bank` opacity raised so the
+  subordinate zones stay legible while still visually subordinate.
+- No observability semantics, collectors, or backend behavior changed;
+  no synthetic nodes/edges; all counts remain truthful.
+
 ## [1.0.1] — 2026-08-20
 
 CRITICAL UI HOTFIX (released after v1.0.0). v1.0.0's automated acceptance was

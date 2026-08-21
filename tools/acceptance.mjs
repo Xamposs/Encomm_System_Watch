@@ -1878,14 +1878,20 @@ async function main() {
     !!(tm && (tm.serviceBanked ?? 0) >= 50 && (tm.orphanBanked ?? 0) >= 50 &&
       tm.orphanFraction < 0.9),
     `bankedServices=${tm?.serviceBanked} bankedOrphans=${tm?.orphanBanked} orphanFrac=${tm?.orphanFraction}`)
-  // AG7 FIT ALL still returns the real graph visibly
+  // AG7 FIT ALL still returns the real graph visibly (bounded poll: live
+  // churn can land a snapshot between pan and fit — the camera must still
+  // end on the graph)
   await cdp.eval(`(() => { window.__esw_cy.pan({ x: -40000, y: -40000 }); return true })()`)
   await sleep(400)
   await cdp.eval(`(() => { window.__esw_controller?.fit(); return true })()`)
-  await sleep(800)
-  tm = await tmc()
+  let ag7ok = false
+  for (let i = 0; i < 12; i++) {
+    await sleep(400)
+    tm = await tmc()
+    if (tm && tm.viewportNodes >= 50) { ag7ok = true; break }
+  }
   check('AG7 FIT ALL returns the real graph to viewport',
-    !!(tm && tm.viewportNodes >= 50), `viewport=${tm?.viewportNodes}`)
+    ag7ok, `viewport=${tm?.viewportNodes}`)
   // AG8 RELAYOUT re-composes the rack and finishes idle
   await cdp.eval(`(() => { window.__esw_controller?.relayout(); return true })()`)
   let relayoutOK = false

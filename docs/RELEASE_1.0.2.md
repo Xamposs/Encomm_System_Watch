@@ -38,6 +38,25 @@ scatter of isolated cards.
 - **AG topology acceptance section (AG1–AG12)** — objective connectedness
   gates in `tools/acceptance.mjs`.
 
+## Final reference-style visual pass (frontend-only, same release)
+
+A second frontend-only iteration driven by a reference control-room
+screenshot: the map now reads as **four labeled semantic zones** with
+visible gaps (`HOSTS · SEMANTIC · INFRA` / `CONNECTED CORE` /
+`SERVICES · UNLINKED` / `PROCESSES · UNLINKED`), with per-column stagger,
+jitter and lean for organized chaos instead of a perfect grid. Two new
+canvas layers: a **wire underlay** (soft colored glow following every real
+rendered edge curve behind the cards + faint uppercase zone headers — zero
+synthetic edges) and a **connection-socket overlay** (small ports on each
+connected node's left/right border, colored by the dominant incident edge
+kind). The edge palette was re-mapped to the reference multicolor language
+(cyan/blue normal, teal/green active, amber services/infra, purple/magenta
+AI, red only for genuine error/close), with longer lane-aware arcs for
+cross-screen drama. Cards got a premium refresh (brighter fills, crisp
+borders, larger PROCESS/SYSTEM cards; banked populations stay legible yet
+visually subordinate). Truthfulness is untouched — every edge is still a
+real relationship, all counts remain exact.
+
 ## Validation
 
 - Frontend: `npm run typecheck` PASS, `npm run build` PASS

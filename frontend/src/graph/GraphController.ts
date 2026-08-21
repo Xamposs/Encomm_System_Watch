@@ -20,6 +20,7 @@ import type {
   ViewMode,
 } from '../types/system'
 import { EdgePulseOverlay, RECENT_MS } from './EdgePulseOverlay'
+import type { ZoneInfo } from './WireUnderlay'
 import { perf } from './PerfMonitor'
 
 cytoscape.use(fcose)
@@ -56,7 +57,7 @@ function edgeCurveDist(e: EdgeSingular): number {
     // similar magnitude => parallel fan-out/fan-in; jitter keeps edges apart
     const sign = tb >= sb ? 1 : -1
     const lane = ((sb * 17 + tb * 29 + ((h >> 3) & 7)) % 6) - 3 // -3..2, stable
-    const base = Math.min(95, Math.max(26, len * 0.13))
+    const base = Math.min(130, Math.max(32, len * 0.16))
     return sign * (base + lane * 5 + ((h >> 7) & 3) * 2)
   }
   const sign = h % 2 === 0 ? 1 : -1
@@ -71,10 +72,10 @@ export const STYLESHEET: StylesheetStyle[] = [
       // cytoscape 3.34 does NOT apply the data(label) default mapping — an
       // explicit mapping is required or every card renders blank (v0.6.0)
       label: 'data(label)',
-      'background-color': '#0f1826',
-      'border-color': '#3d5a7e',
-      'border-width': 0.9,
-      color: '#b9cfe6',
+      'background-color': '#141f33',
+      'border-color': '#4a6893',
+      'border-width': 1.1,
+      color: '#cfe0f5',
       'font-family': 'Consolas, "Cascadia Mono", monospace',
       'font-size': 11.5,
       'text-valign': 'center',
@@ -96,7 +97,7 @@ export const STYLESHEET: StylesheetStyle[] = [
   },
   {
     selector: 'node[kind = "PROCESS"]',
-    style: { shape: 'round-rectangle', width: 104, height: 36, 'border-color': '#46648c', 'border-width': 0.9 },
+    style: { shape: 'round-rectangle', width: 112, height: 40, 'border-color': '#4d70a0', 'border-width': 1.1 },
   },
   {
     selector: 'node[kind = "PROCESS"].zoom-close',
@@ -105,8 +106,8 @@ export const STYLESHEET: StylesheetStyle[] = [
   {
     selector: 'node[kind = "SYSTEM"]',
     style: {
-      shape: 'round-rectangle', width: 150, height: 40, 'border-color': '#6f96c2',
-      'border-width': 1.5, 'background-color': '#1b2f47', 'font-size': 13,
+      shape: 'round-rectangle', width: 158, height: 42, 'border-color': '#7fa3d0',
+      'border-width': 1.7, 'background-color': '#1e3450', 'font-size': 13.5,
     },
   },
   // v1.0.2: banked node populations (stopped services / orphan processes).
@@ -117,8 +118,8 @@ export const STYLESHEET: StylesheetStyle[] = [
     selector: 'node.svc-bank',
     style: {
       width: 96, height: 26, 'font-size': 9.5,
-      'background-color': '#1a1506', 'border-color': '#8a6d2f', 'border-width': 0.9,
-      color: '#c9a76f', 'border-style': 'dashed', opacity: 0.8,
+      'background-color': '#1a1506', 'border-color': '#a58544', 'border-width': 1.0,
+      color: '#d9b87f', 'border-style': 'dashed', opacity: 0.92,
       'text-background-opacity': 0.4,
     },
   },
@@ -126,8 +127,8 @@ export const STYLESHEET: StylesheetStyle[] = [
     selector: 'node.orphan-bank',
     style: {
       width: 92, height: 24, 'font-size': 9,
-      'background-color': '#0d1118', 'border-color': '#3c5780', 'border-width': 0.8,
-      color: '#8ba0ba', opacity: 0.65, 'text-background-opacity': 0.35,
+      'background-color': '#0d1118', 'border-color': '#4a6893', 'border-width': 0.9,
+      color: '#9db3cd', opacity: 0.8, 'text-background-opacity': 0.35,
     },
   },
   // the connected core keeps slightly brighter edges to lead the eye
@@ -278,15 +279,15 @@ export const STYLESHEET: StylesheetStyle[] = [
   {
     selector: 'edge',
     style: {
-      'line-color': '#3a5a78',
-      width: 1.25,
+      'line-color': '#3f5a75',
+      width: 1.35,
       'curve-style': 'unbundled-bezier',
       'control-point-distances': (e) => edgeCurveDist(e as EdgeSingular),
       'control-point-weights': 0.5,
-      opacity: 0.82,
+      opacity: 0.85,
       'target-arrow-shape': 'triangle',
-      'target-arrow-color': '#3a5a78',
-      'arrow-scale': 0.45,
+      'target-arrow-color': '#3f5a75',
+      'arrow-scale': 0.5,
       // invisible overlay widens the hover hit-area (tooltip friendliness)
       'overlay-color': '#35e0ff',
       'overlay-opacity': 0,
@@ -295,22 +296,22 @@ export const STYLESHEET: StylesheetStyle[] = [
       'transition-duration': '300ms' as unknown as number,
     },
   },
-  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#66c4de', 'target-arrow-shape': 'none', width: 1.2, opacity: 0.9 } },
-  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#6dbd70', 'target-arrow-shape': 'none', 'line-style': 'dashed', width: 1 } },
-  { selector: 'edge[kind = "EXTERNAL"]', style: { 'line-color': '#5f9ec9', 'target-arrow-color': '#5f9ec9', width: 1.2, opacity: 0.85 } },
+  { selector: 'edge[kind = "LOCALHOST"]', style: { 'line-color': '#4fd2f7', 'target-arrow-shape': 'none', width: 1.7, opacity: 0.92 } },
+  { selector: 'edge[kind = "LISTEN"]', style: { 'line-color': '#5ee89a', 'target-arrow-shape': 'none', 'line-style': 'dashed', width: 1.4 } },
+  { selector: 'edge[kind = "EXTERNAL"]', style: { 'line-color': '#3f9fe8', 'target-arrow-color': '#3f9fe8', width: 1.6, opacity: 0.9 } },
   // ---- semantic edges (v0.3.0) -------------------------------------------
-  { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#34d399', 'target-arrow-color': '#34d399', 'line-style': 'dashed', width: 1.4 } },
-  { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', width: 1.4 } },
-  { selector: 'edge[kind = "LOCAL_API"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 1.1 } },
-  { selector: 'edge[kind = "HOSTS"]', style: { 'line-color': '#38bdf8', 'target-arrow-color': '#38bdf8', 'line-style': 'dashed', width: 0.9 } },
-  { selector: 'edge[kind = "PROCESS_PARENT"]', style: { 'line-color': '#5a6b85', 'target-arrow-color': '#5a6b85', 'line-style': 'dotted' } },
-  { selector: 'edge[kind = "SPAWNED"]', style: { 'line-color': '#8b7cf0', 'target-arrow-color': '#8b7cf0', 'line-style': 'dotted' } },
-  { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#4a6b95', 'target-arrow-color': '#4a6b95', 'line-style': 'dotted', width: 0.8 } },
+  { selector: 'edge[kind = "USES_GPU"]', style: { 'line-color': '#2fe6a8', 'target-arrow-color': '#2fe6a8', 'line-style': 'dashed', width: 1.7 } },
+  { selector: 'edge[kind = "SERVES_MODEL"]', style: { 'line-color': '#b06cff', 'target-arrow-color': '#b06cff', width: 1.8 } },
+  { selector: 'edge[kind = "LOCAL_API"]', style: { 'line-color': '#5fc8ff', 'target-arrow-color': '#5fc8ff', 'line-style': 'dashed', width: 1.4 } },
+  { selector: 'edge[kind = "HOSTS"]', style: { 'line-color': '#e8a04a', 'target-arrow-color': '#e8a04a', 'line-style': 'dashed', width: 1.2 } },
+  { selector: 'edge[kind = "PROCESS_PARENT"]', style: { 'line-color': '#6b7d95', 'target-arrow-color': '#6b7d95', 'line-style': 'dotted', width: 1.1 } },
+  { selector: 'edge[kind = "SPAWNED"]', style: { 'line-color': '#9a7cf0', 'target-arrow-color': '#9a7cf0', 'line-style': 'dotted', width: 1.2 } },
+  { selector: 'edge[kind = "MEMBER_OF"]', style: { 'line-color': '#a78bfa', 'target-arrow-color': '#a78bfa', 'line-style': 'dotted', width: 1.0 } },
   // ---- infrastructure edges (v0.4.0) --------------------------------------
-  { selector: 'edge[kind = "HOSTED_BY"]', style: { 'line-color': '#e0a63e', 'target-arrow-color': '#e0a63e', 'line-style': 'dashed', width: 1.2 } },
-  { selector: 'edge[kind = "EXPOSES"]', style: { 'line-color': '#2dd4bf', 'target-arrow-color': '#2dd4bf', 'line-style': 'dashed', width: 1.1 } },
-  { selector: 'edge[kind = "CONNECTED_TO"]', style: { 'line-color': '#6a7f96', 'target-arrow-color': '#6a7f96', 'line-style': 'dotted', width: 0.9 } },
-  { selector: 'edge[kind = "BACKED_BY"]', style: { 'line-color': '#d946ef', 'target-arrow-color': '#d946ef', 'line-style': 'dashed', width: 1.1 } },
+  { selector: 'edge[kind = "HOSTED_BY"]', style: { 'line-color': '#e8a04a', 'target-arrow-color': '#e8a04a', 'line-style': 'dashed', width: 1.3 } },
+  { selector: 'edge[kind = "EXPOSES"]', style: { 'line-color': '#2dd4bf', 'target-arrow-color': '#2dd4bf', 'line-style': 'dashed', width: 1.2 } },
+  { selector: 'edge[kind = "CONNECTED_TO"]', style: { 'line-color': '#7f93ac', 'target-arrow-color': '#7f93ac', 'line-style': 'dotted', width: 1.0 } },
+  { selector: 'edge[kind = "BACKED_BY"]', style: { 'line-color': '#e879f9', 'target-arrow-color': '#e879f9', 'line-style': 'dashed', width: 1.2 } },
   { selector: 'edge[?active]', style: { 'line-color': '#5ec9e8', 'target-arrow-color': '#5ec9e8' } },
   { selector: 'edge[?recent]', style: { 'line-color': '#6fd4ee', 'target-arrow-color': '#6fd4ee' } },
   // real observed traffic subtly brightens + thickens the edge; decays back
@@ -484,6 +485,8 @@ export class GraphController {
   /** v1.0.2 rack composition shape (surfaced by topologyMetrics()) */
   private rackColumns = 0
   private rackRows = 0
+  /** v1.0.2 final pass: semantic composition zones (model space). */
+  private zoneLayout: ZoneInfo[] = []
   /** keeps the cytoscape renderer glued to the shell's final dimensions */
   private resizeObs: ResizeObserver | undefined
 
@@ -871,10 +874,30 @@ export class GraphController {
         return { x: pos.x + (Math.random() - 0.5) * 140, y: pos.y + (Math.random() - 0.5) * 140 }
       }
     }
-    const ext = this.cy.extent()
+    return this.graphInteriorPosition(120)
+  }
+
+  /**
+   * Bounded model-space placement for runtime-added nodes (v1.0.2 AG7 fix).
+   *
+   * New nodes land INSIDE the graph's content bounding box — NEVER at the
+   * camera extent (viewport center). The extent follows the camera, which
+   * can be panned to extreme coordinates (e.g. FIT-ALL tests pan far away);
+   * a node placed there poisons the next fit()'s bounding box, collapsing
+   * the camera to minZoom and leaving the graph off-screen (viewport=0).
+   */
+  private graphInteriorPosition(jitter: number): { x: number; y: number } {
+    const bb = this.cy.elements().boundingBox()
+    if (bb && Number.isFinite(bb.x1) && Number.isFinite(bb.y1) &&
+      Number.isFinite(bb.x2) && Number.isFinite(bb.y2)) {
+      return {
+        x: bb.x1 + (bb.x2 - bb.x1) * 0.15 + (Math.random() - 0.5) * jitter,
+        y: bb.y1 + (bb.y2 - bb.y1) * 0.10 + (Math.random() - 0.5) * jitter,
+      }
+    }
     return {
-      x: (ext.x1 + ext.x2) / 2 + (Math.random() - 0.5) * 120,
-      y: (ext.y1 + ext.y2) / 2 + (Math.random() - 0.5) * 120,
+      x: 200 + (Math.random() - 0.5) * jitter,
+      y: 100 + (Math.random() - 0.5) * jitter,
     }
   }
 
@@ -1246,11 +1269,7 @@ export class GraphController {
         y: ap.y + (Math.random() - 0.5) * 180,
       }
     } else {
-      const ext = this.cy.extent()
-      position = {
-        x: (ext.x1 + ext.x2) / 2 + (Math.random() - 0.5) * 160,
-        y: (ext.y1 + ext.y2) / 2 + (Math.random() - 0.5) * 160,
-      }
+      position = this.graphInteriorPosition(160)
     }
     this.cy.add({ group: 'nodes', data, position })
     if (born) {
@@ -1785,65 +1804,86 @@ export class GraphController {
     banked.sort(byName)
     orphanN.sort(byName)
 
-    // 4) column-major rack placement. Rows fill top-to-bottom per column;
-    //    columns go left-to-right. The connected core leads (left bands),
-    //    stopped services + orphans trail as compact banks (right bands).
-    //    Column count is chosen so the composed rack matches the CURRENT
-    //    viewport aspect (wide window -> more columns, tall -> fewer), so the
-    //    map fills the screen instead of letterboxing on either axis.
-    const PITCH_Y = 34
-    const PITCH_X = 150
-    const BANK_PITCH_X = 104
+    // 4) SEMANTIC-ZONE composition (v1.0.2 final pass): each role group
+    //    gets its own column band ("zone") with a visible gap between
+    //    zones, so the map reads as large semantic regions with internal
+    //    structure instead of one even grid. Within a zone, column-major
+    //    fill plus deterministic per-column jitter and a gentle lean keep
+    //    the racks organic ("organized chaos") while remaining stable.
+    const PITCH_Y = 40
+    const PITCH_X = 182
+    const ZONE_GAP = 110
     const viewAspect = cy.width() / Math.max(1, cy.height())
-    const base = Math.sqrt((n * PITCH_Y * viewAspect) / PITCH_X)
-    let cols = Math.max(1, Math.round(base))
-    let best = Math.abs((cols * PITCH_X) / (Math.max(1, Math.ceil(n / cols)) * PITCH_Y) - viewAspect)
-    for (let c = Math.max(1, Math.floor(base) - 4); c <= Math.ceil(base) + 4; c++) {
-      const rows = Math.max(1, Math.ceil(n / c))
-      const a = Math.abs((c * PITCH_X) / (rows * PITCH_Y) - viewAspect)
-      if (a < best) { best = a; cols = c }
+    // rows per column: solved so the composed rack (incl. zone gaps)
+    // roughly matches the viewport aspect at fit
+    let rows = 24
+    {
+      let bestA = Infinity
+      for (let r = 14; r <= 60; r++) {
+        const colsEst = Math.ceil(n / r) + 4
+        const w = colsEst * PITCH_X + 3 * ZONE_GAP
+        const h = r * PITCH_Y
+        const a = Math.abs(w / Math.max(1, h) - viewAspect)
+        if (a < bestA) { bestA = a; rows = r }
+      }
     }
-    const ROWS_PER_COLUMN = Math.max(1, Math.ceil(n / cols))
     const strHash = (s: string): number => {
       let h = 0
       for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
       return h
     }
+    const zones: Array<{ list: NodeSingular[]; role: string; label: string }> = [
+      { list: anchors, role: 'anchor', label: 'HOSTS · SEMANTIC · INFRA' },
+      { list: coreN, role: 'core', label: 'CONNECTED CORE' },
+      { list: banked, role: 'banked', label: 'SERVICES · UNLINKED' },
+      { list: orphanN, role: 'orphan', label: 'PROCESSES · UNLINKED' },
+    ]
 
     const colOf = new Map<string, number>()
-    const rowOf = new Map<string, number>()
     const roleOfNodeId = new Map<string, string>()
-    const colPitchOf = new Map<string, number>()
-    let colCursor = 0
-    let rowCursor = 0
-    const placeGroup = (groupList: NodeSingular[], role: string): void => {
-      const pitchX = role === 'banked' || role === 'orphan' ? BANK_PITCH_X : PITCH_X
-      for (const nd of groupList) {
-        roleOfNodeId.set(nd.id(), role)
-        colOf.set(nd.id(), colCursor)
-        rowOf.set(nd.id(), rowCursor)
-        colPitchOf.set(nd.id(), pitchX)
-        rowCursor += 1
-        if (rowCursor >= ROWS_PER_COLUMN) { colCursor += 1; rowCursor = 0 }
+    const posMap = new Map<string, { x: number; y: number }>()
+    const zoneLayout: ZoneInfo[] = []
+    let bandBase = 0
+    let xCursor = 0
+    for (const z of zones) {
+      if (z.list.length === 0) continue
+      const zoneCols = Math.max(1, Math.ceil(z.list.length / rows))
+      for (let i = 0; i < z.list.length; i++) {
+        const c = Math.floor(i / rows)
+        const r = i % rows
+        const nd = z.list[i]
+        const h = strHash(nd.id())
+        const colJitter = ((h >> 4) % 21) - 10
+        const rowJitter = ((h >> 7) % 11) - 5
+        const lean = Math.sin(c * 0.6) * 9
+        // per-column vertical stagger: breaks the perfect horizontal
+        // alignment between columns (organic feel) without overlapping
+        // rows inside a column
+        const stagger = ((c % 3) - 1) * 9
+        colOf.set(nd.id(), bandBase + c)
+        roleOfNodeId.set(nd.id(), z.role)
+        posMap.set(nd.id(), {
+          x: xCursor + c * PITCH_X + colJitter + lean,
+          y: r * PITCH_Y + rowJitter + stagger,
+        })
       }
-      if (rowCursor > 0) colCursor += 1
-      rowCursor = 0
+      zoneLayout.push({
+        label: z.label,
+        role: z.role,
+        x0: xCursor - 10,
+        x1: xCursor + zoneCols * PITCH_X + 10,
+        y0: -44,
+      })
+      bandBase += zoneCols
+      xCursor += zoneCols * PITCH_X + ZONE_GAP
     }
-    placeGroup(anchors, 'anchor')
-    placeGroup(coreN, 'core')
-    placeGroup(banked, 'banked')
-    placeGroup(orphanN, 'orphan')
 
     // 5) write positions + composition metadata (deterministic)
     cy.batch(() => {
       nodes.forEach((nd) => {
+        const pos = posMap.get(nd.id())
         const c = colOf.get(nd.id()) ?? 0
-        const r = rowOf.get(nd.id()) ?? 0
-        const px = colPitchOf.get(nd.id()) ?? PITCH_X
-        const h = strHash(nd.id())
-        const jx = ((h >> 4) % 9) - 4
-        const jy = ((h >> 7) % 9) - 4
-        nd.position({ x: c * px + jx, y: r * PITCH_Y + jy })
+        if (pos) nd.position(pos)
         const role = roleOfNodeId.get(nd.id()) ?? ''
         nd.data('rackBand', c)
         nd.removeClass('svc-bank orphan-bank core-node')
@@ -1852,8 +1892,9 @@ export class GraphController {
         else if (role === 'core') nd.addClass('core-node')
       })
     })
-    this.rackColumns = colCursor
-    this.rackRows = Math.max(0, ROWS_PER_COLUMN)
+    this.zoneLayout = zoneLayout
+    this.rackColumns = bandBase
+    this.rackRows = Math.max(0, rows)
   }
 
   /** Layout lifecycle (v1.0.2): the deterministic rack composition is the
@@ -1916,6 +1957,11 @@ export class GraphController {
   /** Manual RELAYOUT: re-run the initial layout (fit + randomize). */
   relayout(): void {
     this.runLayout('initial')
+  }
+
+  /** Semantic composition zones for the wire underlay (model space). */
+  getZones(): ZoneInfo[] {
+    return this.zoneLayout
   }
 
   /**
