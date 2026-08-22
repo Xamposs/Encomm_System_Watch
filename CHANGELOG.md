@@ -34,6 +34,9 @@ relationships, or signals were added.
   quality once after a 160 ms settle window.
 
 ### Fixed
+- MID/FIT canvas cells now render cached compact process/service titles instead
+  of empty outlines; title size expands with zoom while keeping the DOM-card
+  count at zero for large views.
 - LISTENING + FAMILIES no longer collapses into an upper-left blob surrounded
   by a mostly empty canvas.
 - ALL + NODES + FIT ALL no longer becomes a thin horizontal strip with nodes

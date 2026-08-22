@@ -2061,7 +2061,12 @@ async function main() {
     return true
   })()`)
   await sleep(300)
-  const midMode = await cdp.eval(`document.querySelector('.graph-card-layer')?.dataset.mode`)
+  const midLodInfo = await cdp.eval(`(() => ({
+    card: document.querySelector('.graph-card-layer')?.dataset.mode,
+    socket: document.querySelector('.graph-socket-overlay')?.dataset.mode,
+    labels: Number(document.querySelector('.graph-socket-overlay')?.dataset.labeledNodes || 0),
+    cardWidth: Number(document.querySelector('.graph-socket-overlay')?.dataset.cardWidth || 0),
+  }))()`)
   await cdp.eval(`(() => {
     const cy = window.__esw_cy
     cy?.zoom({ level: 0.72, renderedPosition: { x: cy.width()/2, y: cy.height()/2 } })
@@ -2072,9 +2077,11 @@ async function main() {
     mode: document.querySelector('.graph-card-layer')?.dataset.mode,
     mounted: Number(document.querySelector('.graph-card-layer')?.dataset.mounted || 0),
   }))()`)
-  check('AH6 MID/NEAR LOD restores readable cards',
-    midMode === 'mid' && lodInfo.mode === 'near' && lodInfo.mounted > 0,
-    `mid=${midMode} near=${lodInfo.mode} mounted=${lodInfo.mounted}`)
+  check('AH6 MID compact labels / NEAR HTML cards restore readable content',
+    midLodInfo.card === 'mid' && midLodInfo.socket === 'mid-mini' &&
+      midLodInfo.labels > 0 && midLodInfo.cardWidth >= 42 &&
+      lodInfo.mode === 'near' && lodInfo.mounted > 0,
+    `mid=${midLodInfo.card}/${midLodInfo.socket} labels=${midLodInfo.labels} width=${midLodInfo.cardWidth} near=${lodInfo.mode} mounted=${lodInfo.mounted}`)
   check('AH7 mounted DOM cards remain viewport-bounded',
     lodInfo.mounted > 0 && lodInfo.mounted <= 180, `mounted=${lodInfo.mounted} cap=180`)
 

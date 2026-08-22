@@ -1,4 +1,4 @@
-import type { Core } from 'cytoscape'
+import type { Core, NodeSingular } from 'cytoscape'
 import { DEFAULT_EDGE_COLOR, EDGE_KIND_COLORS } from './WireUnderlay'
 import { perf } from './PerfMonitor'
 
@@ -46,6 +46,7 @@ export class SocketOverlay {
   private cssW = 1
   private cssH = 1
   private colorCache = new Map<string, string>()
+  private titleCache = new Map<string, string>()
   private cacheDirty = true
   private interacting = false
 
@@ -80,7 +81,31 @@ export class SocketOverlay {
 
   private onTopologyChange = (): void => {
     this.cacheDirty = true
+    this.titleCache.clear()
     this.requestDraw()
+  }
+
+  /**
+   * Keep compact-LOD labels cheap: normalize/truncate once per node and size
+   * tier instead of measuring text on every pan/zoom frame.
+   */
+  private compactTitle(node: NodeSingular, maxChars: number): string {
+    const raw = String(
+      node.data('cardTitle') ??
+      node.data('display_name') ??
+      node.data('name') ??
+      node.data('label') ??
+      node.id(),
+    ).replace(/\s+/g, ' ').trim()
+    const key = `${node.id()}\u0000${maxChars}\u0000${raw}`
+    const cached = this.titleCache.get(key)
+    if (cached !== undefined) return cached
+    const title = raw.length <= maxChars
+      ? raw
+      : `${raw.slice(0, Math.max(1, maxChars - 1))}…`
+    if (this.titleCache.size > 6000) this.titleCache.clear()
+    this.titleCache.set(key, title)
+    return title
   }
 
   private onInteraction = (event: Event): void => {
@@ -165,11 +190,19 @@ export class SocketOverlay {
       // without mounting any HTML DOM cards.
       const far = zoom < 0.09
       this.canvas.dataset.mode = far ? 'far-mini' : 'mid-mini'
-      const width = far ? 15 : 38
-      const height = far ? 8 : 15
+      // Fixed-screen tiers follow the available screen-space pitch. At the
+      // usual FIT ALL zoom (~0.2), 48x17 cards leave a small gap while still
+      // carrying a readable process/service name.
+      const width = far ? 18 : zoom < 0.18 ? 42 : zoom < 0.28 ? 48 : zoom < 0.39 ? 62 : 78
+      const height = far ? 9 : zoom < 0.18 ? 15 : zoom < 0.28 ? 17 : zoom < 0.39 ? 20 : 23
+      const fontSize = far ? 5.5 : zoom < 0.18 ? 6 : zoom < 0.28 ? 7 : zoom < 0.39 ? 8 : 9
+      const maxChars = far ? 2 : zoom < 0.18 ? 7 : zoom < 0.28 ? 9 : zoom < 0.39 ? 11 : 14
       const nodes = cy.nodes(':visible')
       const stride = Math.max(1, Math.ceil(nodes.length / 1400))
       ctx.lineWidth = far ? 0.8 : 1
+      ctx.font = `600 ${fontSize}px Consolas, "Cascadia Mono", monospace`
+      ctx.textBaseline = 'middle'
+      let labeledNodes = 0
       for (let i = 0; i < nodes.length; i += stride) {
         const node = nodes[i]
         const p = node.renderedPosition()
@@ -181,15 +214,29 @@ export class SocketOverlay {
         ctx.roundRect(p.x - width / 2, p.y - height / 2, width, height, far ? 2 : 3)
         ctx.fill()
         ctx.stroke()
+        const title = this.compactTitle(node, maxChars)
+        if (!title) continue
         ctx.fillStyle = color
-        ctx.beginPath()
-        ctx.arc(p.x - width / 2 + (far ? 3 : 4), p.y, far ? 1 : 1.4, 0, Math.PI * 2)
-        ctx.fill()
+        if (far) {
+          ctx.textAlign = 'center'
+          ctx.fillText(title, p.x, p.y + 0.25)
+        } else {
+          ctx.fillRect(p.x - width / 2 + 3, p.y - height / 2 + 3, 1.5, height - 6)
+          ctx.textAlign = 'left'
+          ctx.fillText(title, p.x - width / 2 + 7, p.y + 0.25)
+        }
+        labeledNodes += 1
       }
+      this.canvas.dataset.labeledNodes = String(labeledNodes)
+      this.canvas.dataset.cardWidth = String(width)
+      this.canvas.dataset.cardHeight = String(height)
       perf.recordOverlayDraw('socket', performance.now() - started)
       return
     }
     this.canvas.dataset.mode = this.interacting ? 'interaction-paused' : 'near-sockets'
+    this.canvas.dataset.labeledNodes = '0'
+    delete this.canvas.dataset.cardWidth
+    delete this.canvas.dataset.cardHeight
     if (this.interacting) {
       perf.recordOverlayDraw('socket', performance.now() - started)
       return
@@ -238,6 +285,7 @@ export class SocketOverlay {
     if (this.raf) cancelAnimationFrame(this.raf)
     perf.setOverlayRaf('sockets', false)
     this.ro.disconnect()
+    this.titleCache.clear()
     this.cy.off('pan zoom resize', this.requestDraw)
     this.cy.off('position', 'node', this.requestDraw)
     this.cy.off('add remove', 'edge', this.onTopologyChange)
