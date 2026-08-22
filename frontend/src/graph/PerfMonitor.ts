@@ -46,6 +46,22 @@ export interface PerfSnapshot {
   heapMB: number | null
   heapSamples: number
   rAFActive: boolean
+  idleRafActive: boolean
+  mountedCards: number
+  cardCreates: number
+  cardUpdates: number
+  cardRemovals: number
+  cardDrawMs: SampleStat
+  wireDrawMs: SampleStat
+  socketDrawMs: SampleStat
+  signalDrawMs: SampleStat
+  interactionFrameMs: SampleStat
+  overlayRedrawsPerSecond: number
+  fitMs: number
+  graphAspectRatio: number
+  viewportAspectRatio: number
+  layoutCacheHits: number
+  layoutCacheMisses: number
 }
 
 function newStat(): SampleStat {
@@ -62,6 +78,12 @@ class PerfMonitor {
     particles: () => number
     overlayRunning: () => boolean
     overlayActivity: () => number
+    mountedCards: () => number
+    graphAspectRatio: () => number
+    viewportAspectRatio: () => number
+    layoutCacheHits: () => number
+    layoutCacheMisses: () => number
+    fitMs: () => number
   } | null = null
 
   private updateMs = newStat()
@@ -71,6 +93,16 @@ class PerfMonitor {
   private aiToggleMs: number | null = null
   private searchMs: number | null = null
   private filterMs: number | null = null
+  private cardDrawMs = newStat()
+  private wireDrawMs = newStat()
+  private socketDrawMs = newStat()
+  private signalDrawMs = newStat()
+  private interactionFrameMs = newStat()
+  private cardCreates = 0
+  private cardUpdates = 0
+  private cardRemovals = 0
+  private overlayRedraws: number[] = []
+  private overlayRaf = new Set<string>()
 
   // frame activity: counted while benchmark mode is on (validation only)
   private raf = 0
@@ -147,6 +179,45 @@ class PerfMonitor {
     this.filterMs = ms
   }
 
+  recordFit(_ms: number): void {
+    // The live value is supplied by GraphController so it cannot drift from
+    // viewportHealth(); keep this method as the instrumentation call site.
+  }
+
+  private addSample(stat: SampleStat, ms: number): void {
+    stat.last = ms
+    stat.max = Math.max(stat.max, ms)
+    stat.total += ms
+    stat.count += 1
+  }
+
+  recordOverlayDraw(kind: 'card' | 'wire' | 'socket' | 'signal', ms: number): void {
+    this.addSample(
+      kind === 'card' ? this.cardDrawMs :
+        kind === 'wire' ? this.wireDrawMs :
+          kind === 'socket' ? this.socketDrawMs : this.signalDrawMs,
+      ms,
+    )
+    const now = performance.now()
+    this.overlayRedraws.push(now)
+    while (this.overlayRedraws.length && now - this.overlayRedraws[0] > 1000) this.overlayRedraws.shift()
+  }
+
+  recordInteractionFrame(ms: number): void {
+    this.addSample(this.interactionFrameMs, ms)
+  }
+
+  recordCardCounts(creates: number, updates: number, removals: number): void {
+    this.cardCreates = creates
+    this.cardUpdates = updates
+    this.cardRemovals = removals
+  }
+
+  setOverlayRaf(name: string, active: boolean): void {
+    if (active) this.overlayRaf.add(name)
+    else this.overlayRaf.delete(name)
+  }
+
   // ------------------------------------------------------------ frames
 
   private frameLoop = (): void => {
@@ -194,6 +265,8 @@ class PerfMonitor {
 
   snapshot(): PerfSnapshot {
     const g = this.graphSource
+    const now = performance.now()
+    while (this.overlayRedraws.length && now - this.overlayRedraws[0] > 1000) this.overlayRedraws.shift()
     return {
       benchmarkMode: this.benchmarkMode,
       nodes: g?.nodes() ?? 0,
@@ -216,6 +289,24 @@ class PerfMonitor {
       heapMB: this.heapSamples.length ? this.heapSamples[this.heapSamples.length - 1] : null,
       heapSamples: this.heapSamples.length,
       rAFActive: this.rAFActive,
+      // Benchmark FPS sampling is diagnostic and tracked separately as
+      // rAFActive. idleRafActive answers only whether a render overlay is live.
+      idleRafActive: this.overlayRaf.size > 0,
+      mountedCards: g?.mountedCards() ?? 0,
+      cardCreates: this.cardCreates,
+      cardUpdates: this.cardUpdates,
+      cardRemovals: this.cardRemovals,
+      cardDrawMs: { ...this.cardDrawMs },
+      wireDrawMs: { ...this.wireDrawMs },
+      socketDrawMs: { ...this.socketDrawMs },
+      signalDrawMs: { ...this.signalDrawMs },
+      interactionFrameMs: { ...this.interactionFrameMs },
+      overlayRedrawsPerSecond: this.overlayRedraws.length,
+      fitMs: g?.fitMs() ?? 0,
+      graphAspectRatio: g?.graphAspectRatio() ?? 0,
+      viewportAspectRatio: g?.viewportAspectRatio() ?? 0,
+      layoutCacheHits: g?.layoutCacheHits() ?? 0,
+      layoutCacheMisses: g?.layoutCacheMisses() ?? 0,
     }
   }
 }

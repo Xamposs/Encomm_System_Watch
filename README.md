@@ -386,7 +386,10 @@ script, production launcher, release docs, tagged) with **v1.0.1** — a critica
 UI hotfix that restored real graph visibility (camera/layout fix) and
 **v1.0.2** — a visual topology composition / edge-routing fidelity release
 (connection-aware rack layout, lane-aware edge bundling, compact service
-banks; no observability changes).
+banks; no observability changes), followed by **v1.0.3** — the performance and
+view-geometry hotfix (compact filtered layouts, viewport-correct FIT ALL,
+NEAR/MID/FAR LOD, bounded overlay work, and idle settling; telemetry semantics
+unchanged).
 
 ## Repository
 

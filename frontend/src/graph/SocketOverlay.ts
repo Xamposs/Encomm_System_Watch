@@ -1,5 +1,6 @@
 import type { Core } from 'cytoscape'
 import { DEFAULT_EDGE_COLOR, EDGE_KIND_COLORS } from './WireUnderlay'
+import { perf } from './PerfMonitor'
 
 /** Tie-break order for a node's dominant edge kind (socket color). */
 const SOCKET_PRIORITY = [
@@ -19,6 +20,12 @@ const SOCKET_PRIORITY = [
   'CONNECTED_TO',
   'PROCESS_PARENT',
 ]
+
+const NODE_KIND_COLORS: Record<string, string> = {
+  SERVICE: '#d7aa57', GPU: '#71d8b1', LISTENING_PORT: '#71d8b1',
+  SEMANTIC: '#e477b9', AI_RUNTIME: '#e477b9', EXTERNAL_ENDPOINT: '#70c8eb',
+  PROCESS: '#52d9ed', SYSTEM: '#d7aa57', CONTAINER: '#71d8b1', VM: '#b99af2',
+}
 
 /**
  * Top connection-socket canvas (v1.0.2 final pass).
@@ -40,12 +47,14 @@ export class SocketOverlay {
   private cssH = 1
   private colorCache = new Map<string, string>()
   private cacheDirty = true
+  private interacting = false
 
   constructor(
     private cy: Core,
-    container: HTMLElement,
+    private container: HTMLElement,
   ) {
     this.canvas = document.createElement('canvas')
+    this.canvas.className = 'graph-socket-overlay'
     this.canvas.style.cssText =
       'position:absolute;inset:0;pointer-events:none;z-index:14;'
     container.appendChild(this.canvas)
@@ -55,6 +64,7 @@ export class SocketOverlay {
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
     container.addEventListener('esw:layout', this.requestDraw)
+    container.addEventListener('esw:interaction', this.onInteraction)
     this.resize()
     cy.on('pan zoom resize', this.requestDraw)
     cy.on('position', 'node', this.requestDraw)
@@ -70,6 +80,11 @@ export class SocketOverlay {
 
   private onTopologyChange = (): void => {
     this.cacheDirty = true
+    this.requestDraw()
+  }
+
+  private onInteraction = (event: Event): void => {
+    this.interacting = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
     this.requestDraw()
   }
 
@@ -91,9 +106,10 @@ export class SocketOverlay {
   private requestDraw = (): void => {
     if (this.destroyed) return
     if (this.raf) return
+    perf.setOverlayRaf('sockets', true)
     this.raf = requestAnimationFrame(() => {
       this.raf = 0
-      this.draw()
+      try { this.draw() } finally { perf.setOverlayRaf('sockets', false) }
     })
   }
 
@@ -137,13 +153,52 @@ export class SocketOverlay {
   }
 
   private draw(): void {
+    const started = performance.now()
     const cy = this.cy
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.cssW, this.cssH)
     const zoom = cy.zoom()
-    if (zoom < 0.36) return // compact canvas nodes do not need HTML-card sockets
+    if (zoom < 0.5) {
+      // MID/FAR LOD: fixed-screen canvas mini-cards. Cytoscape model units
+      // shrink with zoom, so relying on native borders alone turns nodes into
+      // hairlines. This pass preserves a clear rectangular representation
+      // without mounting any HTML DOM cards.
+      const far = zoom < 0.09
+      this.canvas.dataset.mode = far ? 'far-mini' : 'mid-mini'
+      const width = far ? 15 : 38
+      const height = far ? 8 : 15
+      const nodes = cy.nodes(':visible')
+      const stride = Math.max(1, Math.ceil(nodes.length / 1400))
+      ctx.lineWidth = far ? 0.8 : 1
+      for (let i = 0; i < nodes.length; i += stride) {
+        const node = nodes[i]
+        const p = node.renderedPosition()
+        if (p.x < -width || p.x > this.cssW + width || p.y < -height || p.y > this.cssH + height) continue
+        const color = NODE_KIND_COLORS[String(node.data('kind') ?? '')] ?? '#6da3bd'
+        ctx.fillStyle = far ? 'rgba(16,31,48,0.92)' : 'rgba(15,27,44,0.94)'
+        ctx.strokeStyle = color
+        ctx.beginPath()
+        ctx.roundRect(p.x - width / 2, p.y - height / 2, width, height, far ? 2 : 3)
+        ctx.fill()
+        ctx.stroke()
+        ctx.fillStyle = color
+        ctx.beginPath()
+        ctx.arc(p.x - width / 2 + (far ? 3 : 4), p.y, far ? 1 : 1.4, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      perf.recordOverlayDraw('socket', performance.now() - started)
+      return
+    }
+    this.canvas.dataset.mode = this.interacting ? 'interaction-paused' : 'near-sockets'
+    if (this.interacting) {
+      perf.recordOverlayDraw('socket', performance.now() - started)
+      return
+    }
     const nodes = cy.nodes(':visible')
-    if (nodes.length === 0 || nodes.length > 3000) return
+    if (nodes.length === 0 || nodes.length > 3000) {
+      perf.recordOverlayDraw('socket', performance.now() - started)
+      return
+    }
     if (this.cacheDirty) this.rebuildCache()
     const pan = cy.pan()
     const r = Math.max(2.2, 4.4 * zoom)
@@ -175,15 +230,19 @@ export class SocketOverlay {
       ctx.fill()
       ctx.stroke()
     }
+    perf.recordOverlayDraw('socket', performance.now() - started)
   }
 
   destroy(): void {
     this.destroyed = true
+    if (this.raf) cancelAnimationFrame(this.raf)
+    perf.setOverlayRaf('sockets', false)
     this.ro.disconnect()
     this.cy.off('pan zoom resize', this.requestDraw)
     this.cy.off('position', 'node', this.requestDraw)
     this.cy.off('add remove', 'edge', this.onTopologyChange)
     this.canvas.parentElement?.removeEventListener('esw:layout', this.requestDraw)
+    this.container.removeEventListener('esw:interaction', this.onInteraction)
     this.canvas.remove()
   }
 }

@@ -1,4 +1,4 @@
-// Performance smoke for v1.0.2 final visual pass: real graph, 1000, 1500.
+// Performance smoke for v1.0.3 adaptive rendering: real graph, 1000, 1500.
 // Asserts: no continuous relayout, no continuous fit, no major idle animation
 // regression, no major interaction regression. Uses the TEST-ONLY benchmark
 // mode (labeled synthetic — never real telemetry).
@@ -83,6 +83,10 @@ for (const [name, n] of [['1000', 1000], ['1500', 1500]]) {
   await sleep(2000)
   s = await waitSettle(n, 60000)
   check(`${name}: graph composed (${n} nodes)`, s.nodes >= n, `nodes=${s.nodes} edges=${s.edges} state=${s.layoutState}`)
+  // v1.0.3 owns camera work in a two-frame post-layout stage. layoutState can
+  // truthfully be idle just before that scheduled fit executes, so sample the
+  // stability baseline only after the camera has had a stable render frame.
+  await sleep(1500)
   const b0 = await snap()
   await sleep(9000)
   s = await snap()

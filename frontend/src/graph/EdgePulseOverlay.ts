@@ -1,5 +1,6 @@
 import type { Core, EdgeSingular } from 'cytoscape'
 import type { NetworkActivityItem } from '../types/system'
+import { perf } from './PerfMonitor'
 
 export type PulseKind = 'open' | 'close' | 'update'
 
@@ -132,6 +133,7 @@ export class EdgePulseOverlay {
     private container: HTMLElement,
   ) {
     this.canvas = document.createElement('canvas')
+    this.canvas.className = 'graph-signal-overlay'
     this.canvas.style.cssText =
       'position:absolute;inset:0;pointer-events:none;z-index:10;'
     container.appendChild(this.canvas)
@@ -227,7 +229,11 @@ export class EdgePulseOverlay {
       this.activity = new Map(sorted.slice(0, MAX_ACTIVITY_EDGES))
     }
     this.activityOrder = [...this.activity.entries()]
-      .sort((a, b) => b[1].level - a[1].level || b[1].lastActivity - a[1].lastActivity)
+      .sort((a, b) => {
+        const av = this.cy.getElementById(a[0]).visible() ? 1 : 0
+        const bv = this.cy.getElementById(b[0]).visible() ? 1 : 0
+        return bv - av || b[1].level - a[1].level || b[1].lastActivity - a[1].lastActivity
+      })
       .map(([edgeId]) => edgeId)
     if (items.length > 0) this.ensureRunning()
   }
@@ -264,7 +270,7 @@ export class EdgePulseOverlay {
 
   private spawnAiParticle(edgeId: string, st: AiSignal): void {
     const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
-    if (edge.length === 0 || edge.removed()) return
+    if (edge.length === 0 || edge.removed() || !edge.visible()) return
     const own = this.aiParticles.filter((p) => p.edgeId === edgeId)
     if (own.length >= AI_PER_EDGE_CAP) return
     if (this.aiParticles.length >= this.aiParticleBudget()) return
@@ -283,7 +289,7 @@ export class EdgePulseOverlay {
 
   private spawnParticle(edgeId: string, st: EdgeActivity): void {
     const edge = this.cy.getElementById(edgeId) as unknown as EdgeSingular
-    if (edge.length === 0 || edge.removed()) return
+    if (edge.length === 0 || edge.removed() || !edge.visible()) return
     const own = this.particles.filter((p) => p.edgeId === edgeId)
     if (own.length >= (PER_EDGE_CAP[st.level] ?? 2)) return
     if (this.particles.length >= this.dataParticleBudget()) return
@@ -308,16 +314,19 @@ export class EdgePulseOverlay {
   private ensureRunning(): void {
     if (this.enabled && !this.running) {
       this.running = true
+      perf.setOverlayRaf('signals', true)
       this.loop()
     }
   }
 
   private dataParticleBudget(): number {
-    return this.cy.zoom() < 0.36 ? 36 : MAX_PARTICLES
+    const zoom = this.cy.zoom()
+    return zoom < 0.09 ? 24 : zoom < 0.5 ? 60 : MAX_PARTICLES
   }
 
   private aiParticleBudget(): number {
-    return this.cy.zoom() < 0.36 ? 8 : MAX_AI_PARTICLES
+    const zoom = this.cy.zoom()
+    return zoom < 0.09 ? 4 : zoom < 0.5 ? 10 : MAX_AI_PARTICLES
   }
 
   private clearSignalTimer(key: string): void {
@@ -413,6 +422,7 @@ export class EdgePulseOverlay {
   }
 
   private loop = (): void => {
+    const started = performance.now()
     this.raf = requestAnimationFrame(this.loop)
     const now = performance.now()
 
@@ -486,8 +496,10 @@ export class EdgePulseOverlay {
     if (!hasData && !hasRecent && !hasPulses && !hasAi && this.particles.length === 0) {
       cancelAnimationFrame(this.raf)
       this.running = false
+      perf.setOverlayRaf('signals', false)
       this.stops += 1
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+      perf.recordOverlayDraw('signal', performance.now() - started)
       return
     }
 
@@ -509,7 +521,7 @@ export class EdgePulseOverlay {
       const age = now - st.lastActivity
       if (age >= ACTIVE_MS && age < RECENT_MS) slowDots.add(edgeId)
     }
-    const slowDotBudget = this.cy.zoom() < 0.36 ? 16 : 60
+    const slowDotBudget = this.cy.zoom() < 0.09 ? 8 : this.cy.zoom() < 0.5 ? 24 : 60
     let slowDotCount = 0
     for (const edgeId of slowDots) {
       if (slowDotCount++ >= slowDotBudget) break
@@ -560,7 +572,6 @@ export class EdgePulseOverlay {
       }
       ctx.globalAlpha = 1
     }
-
     // --- AI application signal diamonds (proven telemetry, not bytes) ----
     for (const p of this.aiParticles) {
       const edge = this.cy.getElementById(p.edgeId) as unknown as EdgeSingular
@@ -642,6 +653,7 @@ export class EdgePulseOverlay {
       }
       ctx.globalAlpha = 1
     }
+    perf.recordOverlayDraw('signal', performance.now() - started)
   }
 
   setEnabled(on: boolean): void {
@@ -651,6 +663,7 @@ export class EdgePulseOverlay {
     if (on) return
     cancelAnimationFrame(this.raf)
     this.running = false
+    perf.setOverlayRaf('signals', false)
     this.activity.clear()
     this.activityOrder = []
     this.particles = []
@@ -668,6 +681,7 @@ export class EdgePulseOverlay {
   destroy(): void {
     if (this.enabled) this.setEnabled(false)
     else cancelAnimationFrame(this.raf)
+    perf.setOverlayRaf('signals', false)
     this.ro.disconnect()
     this.canvas.remove()
   }

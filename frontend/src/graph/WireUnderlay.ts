@@ -1,4 +1,5 @@
 import type { Core } from 'cytoscape'
+import { perf } from './PerfMonitor'
 
 /**
  * Reference-fidelity wiring palette. Edge kind remains the source of truth;
@@ -75,13 +76,15 @@ export class WireUnderlay {
   private cssH = 1
   private lastDraw = 0
   private drawTimer: number | undefined
+  private interacting = false
 
   constructor(
     private cy: Core,
-    container: HTMLElement,
+    private container: HTMLElement,
     private getZones: () => ZoneInfo[],
   ) {
     this.canvas = document.createElement('canvas')
+    this.canvas.className = 'graph-wire-underlay'
     this.canvas.style.cssText =
       'position:absolute;inset:0;pointer-events:none;z-index:0;'
     // first child => cytoscape's own canvases (created earlier) paint above
@@ -92,6 +95,7 @@ export class WireUnderlay {
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
     container.addEventListener('esw:layout', this.requestDraw)
+    container.addEventListener('esw:interaction', this.onInteraction)
     this.resize()
     cy.on('pan zoom resize', this.requestDraw)
     cy.on('position', 'node', this.requestDraw)
@@ -102,6 +106,11 @@ export class WireUnderlay {
 
   private onDestroy = (): void => {
     this.destroyed = true
+  }
+
+  private onInteraction = (event: Event): void => {
+    this.interacting = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    this.requestDraw()
   }
 
   private resize(): void {
@@ -123,13 +132,15 @@ export class WireUnderlay {
     if (this.destroyed || this.raf || this.drawTimer !== undefined) return
     // Decorative wire glow is intentionally capped at 20 fps. Geometry and
     // hit-testing remain native Cytoscape; this pass never needs 60 redraws/s.
-    const wait = Math.max(0, 50 - (performance.now() - this.lastDraw))
+    const frameInterval = this.interacting ? 90 : 50
+    const wait = Math.max(0, frameInterval - (performance.now() - this.lastDraw))
+    perf.setOverlayRaf('wires', true)
     const schedule = (): void => {
       this.drawTimer = undefined
       this.raf = requestAnimationFrame(() => {
         this.raf = 0
         this.lastDraw = performance.now()
-        this.draw()
+        try { this.draw() } finally { perf.setOverlayRaf('wires', false) }
       })
     }
     if (wait > 1) this.drawTimer = window.setTimeout(schedule, wait)
@@ -153,11 +164,17 @@ export class WireUnderlay {
   }
 
   private draw(): void {
+    const started = performance.now()
     const cy = this.cy
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.cssW, this.cssH)
-    if (cy.nodes().length === 0) return
+    if (cy.nodes().length === 0) {
+      perf.recordOverlayDraw('wire', performance.now() - started)
+      return
+    }
     const zoom = cy.zoom()
+    const quality = this.interacting ? 'interaction' : zoom < 0.16 ? 'far' : zoom < 0.58 ? 'mid' : 'near'
+    this.canvas.dataset.quality = quality
     const pan = cy.pan()
     const toX = (mx: number): number => mx * zoom + pan.x
     const toY = (my: number): number => my * zoom + pan.y
@@ -165,12 +182,13 @@ export class WireUnderlay {
     // --- edge glow underlay (real rendered curves, behind the cards) -------
     const edges = cy.edges(':visible')
     // defensive cap: huge fixture graphs skip the decorative pass
+    let processed = 0
     if (edges.length <= 2600) {
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
       // At FIT ALL, painting every glow twice costs far more than the tiny
       // sub-pixel result. Keep a stable representative wire field instead.
-      const target = zoom < 0.36 ? 520 : 1800
+      const target = this.interacting ? 220 : zoom < 0.16 ? 320 : zoom < 0.58 ? 700 : 1500
       const stride = Math.max(1, Math.ceil(edges.length / target))
       for (let i = 0; i < edges.length; i += stride) {
         const e = edges[i]
@@ -182,23 +200,32 @@ export class WireUnderlay {
         const s = e.sourceEndpoint()
         const t = e.targetEndpoint()
         if (!s || !t || typeof s.x !== 'number' || typeof t.x !== 'number') continue
+        const sx = toX(s.x); const sy = toY(s.y); const tx = toX(t.x); const ty = toY(t.y)
+        const margin = 80
+        if ((sx < -margin && tx < -margin) || (sx > this.cssW + margin && tx > this.cssW + margin) ||
+          (sy < -margin && ty < -margin) || (sy > this.cssH + margin && ty > this.cssH + margin)) continue
+        processed += 1
         const cp = this.controlPointOf(e)
         const w = Math.max(2.4, 4.2 * zoom)
         ctx.strokeStyle = color
         ctx.globalAlpha = alpha
         ctx.lineWidth = w
         ctx.beginPath()
-        ctx.moveTo(toX(s.x), toY(s.y))
-        if (cp) ctx.quadraticCurveTo(toX(cp.x), toY(cp.y), toX(t.x), toY(t.y))
-        else ctx.lineTo(toX(t.x), toY(t.y))
+        ctx.moveTo(sx, sy)
+        if (cp) ctx.quadraticCurveTo(toX(cp.x), toY(cp.y), tx, ty)
+        else ctx.lineTo(tx, ty)
         ctx.stroke()
         // inner brighter pass -> soft neon falloff
-        ctx.globalAlpha = Math.min(0.78, alpha * 2.1)
-        ctx.lineWidth = Math.max(0.9, 1.45 * zoom)
-        ctx.stroke()
+        if (!this.interacting && zoom >= 0.58) {
+          ctx.globalAlpha = Math.min(0.78, alpha * 2.1)
+          ctx.lineWidth = Math.max(0.9, 1.45 * zoom)
+          ctx.stroke()
+        }
       }
       ctx.globalAlpha = 1
     }
+    this.canvas.dataset.processedEdges = String(processed)
+    this.canvas.dataset.visibleEdges = String(edges.length)
 
     // --- faint zone headers (semantic regions of the composed map) ---------
     for (const z of this.getZones()) {
@@ -226,17 +253,22 @@ export class WireUnderlay {
         ;(ctx as unknown as { letterSpacing: string }).letterSpacing = '0px'
       } catch { /* older engines */ }
     }
+    const elapsed = performance.now() - started
+    perf.recordOverlayDraw('wire', elapsed)
+    if (this.interacting) perf.recordInteractionFrame(elapsed)
   }
 
   destroy(): void {
     this.destroyed = true
     if (this.raf) cancelAnimationFrame(this.raf)
     if (this.drawTimer !== undefined) window.clearTimeout(this.drawTimer)
+    perf.setOverlayRaf('wires', false)
     this.ro.disconnect()
     this.cy.off('pan zoom resize', this.requestDraw)
     this.cy.off('position', 'node', this.requestDraw)
     this.cy.off('add remove', 'edge', this.requestDraw)
     this.canvas.parentElement?.removeEventListener('esw:layout', this.requestDraw)
+    this.container.removeEventListener('esw:interaction', this.onInteraction)
     this.canvas.remove()
   }
 }

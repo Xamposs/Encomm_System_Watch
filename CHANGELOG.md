@@ -2,6 +2,45 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [1.0.3] — 2026-08-22
+
+PERFORMANCE + VIEW-GEOMETRY HOTFIX. Telemetry semantics, collectors, graph
+truthfulness, and activity provenance are unchanged; no synthetic nodes,
+relationships, or signals were added.
+
+### Added
+- **True NEAR / MID / FAR graph LOD** — premium virtualized HTML cards at
+  readable zoom, compact canvas mini-cards at MID, and a bounded glyph-style
+  representation at FAR. Full-card DOM mounts are capped to the viewport.
+- **View-layout cache and geometry diagnostics** — deterministic layouts are
+  cached by filter/view/topology revision, with aspect, viewport coverage,
+  mounted-card, fit, overlay-draw, interaction-frame, and idle-rAF metrics.
+- **AH1–AH18 acceptance section** for filtered geometry, FIT ALL, LOD,
+  virtualization, adaptive overlays, idle settling, cache behavior, view
+  switching, and truthfulness invariants.
+
+### Changed
+- Filtered NODES/FAMILIES views now compose only the current visible subset;
+  returning to ALL restores the deterministic complete topology composition.
+- Rack row/column solving is viewport-aware, preventing ultra-wide 8:1+
+  layouts and the line-only FIT ALL failure.
+- FIT ALL frames current visible nodes after two stable animation frames and
+  excludes hidden inventory and outlying curved-edge control points.
+- Wire glow uses zoom/interaction-dependent sampling; sockets pause during
+  interaction and become cheap canvas mini-cards at MID/FAR; LIVE FLOW keeps
+  bounded zoom-aware particle budgets prioritizing visible real activity.
+- Metric-only family updates no longer rebuild the family projection or move
+  the camera. Pan/zoom/drag use a cheap transform-only path and restore normal
+  quality once after a 160 ms settle window.
+
+### Fixed
+- LISTENING + FAMILIES no longer collapses into an upper-left blob surrounded
+  by a mostly empty canvas.
+- ALL + NODES + FIT ALL no longer becomes a thin horizontal strip with nodes
+  effectively invisible.
+- Hidden/filter-excluded elements are deterministically excluded from camera
+  fit and visible-subset composition across Cytoscape style-cache versions.
+
 ## [1.0.2] — 2026-08-20
 
 VISUAL TOPOLOGY FIDELITY RELEASE — frontend-only composition/routing pass.

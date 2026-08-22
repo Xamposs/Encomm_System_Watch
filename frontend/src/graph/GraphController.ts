@@ -390,15 +390,14 @@ export const STYLESHEET: StylesheetStyle[] = [
       'overlay-opacity': 0,
     },
   },
-  // Adaptive performance LOD: FIT ALL / far zoom uses Cytoscape's single
-  // canvas instead of hundreds of HTML cards. The cards return automatically
-  // when the user zooms in far enough to read them.
+  // Adaptive performance LOD: near uses virtualized HTML cards, mid uses
+  // compact native cards, and far uses cheap but clearly visible mini-nodes.
   {
-    selector: 'node.card-lod',
+    selector: 'node.card-lod-mid',
     style: {
       label: 'data(cardTitle)',
-      width: 126,
-      height: 34,
+      width: 210,
+      height: 60,
       'background-opacity': 0.78,
       'background-color': '#111a29',
       'border-opacity': 0.9,
@@ -406,15 +405,42 @@ export const STYLESHEET: StylesheetStyle[] = [
       'border-width': 1,
       'text-opacity': 0.86,
       color: '#a9bdd0',
-      'font-size': 8.5,
+      'font-size': 9.5,
       'text-background-opacity': 0,
-      'text-max-width': '112px',
+      'text-max-width': '188px',
     },
   },
-  { selector: 'node.card-lod[kind = "SERVICE"]', style: { 'border-color': '#a87319', color: '#d7aa57' } },
-  { selector: 'node.card-lod[kind = "GPU"], node.card-lod[kind = "LISTENING_PORT"]', style: { 'border-color': '#2a9f77', color: '#71d8b1' } },
-  { selector: 'node.card-lod[kind = "SEMANTIC"], node.card-lod[kind = "AI_RUNTIME"]', style: { 'border-color': '#b83a83', color: '#e477b9' } },
-  { selector: 'node.card-lod[kind = "EXTERNAL_ENDPOINT"]', style: { 'border-color': '#2786ae', color: '#70c8eb' } },
+  {
+    selector: 'node.card-lod-far',
+    style: {
+      label: 'data(cardGlyph)',
+      width: 110,
+      height: 36,
+      'background-opacity': 0.86,
+      'background-color': '#101c2d',
+      'border-opacity': 1,
+      'border-color': '#35bdda',
+      'border-width': 1.2,
+      'text-opacity': 0.94,
+      color: '#a8eff8',
+      'font-size': 8,
+      'font-weight': 700,
+      'text-background-opacity': 0,
+    },
+  },
+  {
+    // The existence selector makes this more specific than every kind rule,
+    // so the native hit-box cannot show through the premium HTML card.
+    selector: 'node.card-lod-near[kind]',
+    style: {
+      width: 184, height: 64, label: '',
+      'background-opacity': 0, 'border-opacity': 0, 'text-opacity': 0,
+    },
+  },
+  { selector: 'node.card-lod-mid[kind = "SERVICE"], node.card-lod-far[kind = "SERVICE"]', style: { 'border-color': '#a87319', color: '#d7aa57' } },
+  { selector: 'node.card-lod-mid[kind = "GPU"], node.card-lod-mid[kind = "LISTENING_PORT"], node.card-lod-far[kind = "GPU"], node.card-lod-far[kind = "LISTENING_PORT"]', style: { 'border-color': '#2a9f77', color: '#71d8b1' } },
+  { selector: 'node.card-lod-mid[kind = "SEMANTIC"], node.card-lod-mid[kind = "AI_RUNTIME"], node.card-lod-far[kind = "SEMANTIC"], node.card-lod-far[kind = "AI_RUNTIME"]', style: { 'border-color': '#b83a83', color: '#e477b9' } },
+  { selector: 'node.card-lod-mid[kind = "EXTERNAL_ENDPOINT"], node.card-lod-far[kind = "EXTERNAL_ENDPOINT"]', style: { 'border-color': '#2786ae', color: '#70c8eb' } },
   {
     selector: 'node.signal-source, node.signal-target',
     style: {
@@ -466,8 +492,19 @@ interface EdgeActivityState {
   level: number
 }
 
-const ZOOM_FAR = 0.38
-const ZOOM_CLOSE = 0.8
+interface ViewLayoutCacheEntry {
+  revision: number
+  signature: string
+  positions: Map<string, { x: number; y: number }>
+  zones: ZoneInfo[]
+  columns: number
+  rows: number
+}
+
+type CameraTarget = 'overview' | 'current'
+
+const ZOOM_FAR = 0.09
+const ZOOM_CLOSE = 0.5
 
 // incremental-layout policy (v0.3.1): on large graphs, small node additions
 // must NOT trigger an expensive fcose pass over the whole graph. Above
@@ -475,6 +512,10 @@ const ZOOM_CLOSE = 0.8
 // reaches LARGE_GRAPH_MIN_BATCH (or 5% of the graph, whichever is larger).
 const LARGE_GRAPH_NODES = 600
 const LARGE_GRAPH_MIN_BATCH = 40
+const VIEW_GAP_X = 280
+const VIEW_GAP_Y = 230
+const CARD_PITCH_X = 232
+const CARD_PITCH_Y = 88
 
 // ---- transient AI runtime node budgets (v0.5.0) ---------------------------
 // High-frequency AI events must never permanently explode graph node count:
@@ -483,6 +524,14 @@ const MAX_AI_RUNTIME_NODES = 24
 const AI_RUN_TTL_MS = 90_000
 const AI_RUN_FINISHED_TTL_MS = 12_000
 const AI_SPAN_TTL_MS = 45_000
+const TOPOLOGY_EVENT_TYPES = new Set<string>([
+  'PROCESS_STARTED', 'PROCESS_STOPPED', 'CONNECTION_OPENED', 'CONNECTION_CLOSED',
+  'HERMES_DETECTED', 'LM_STUDIO_DETECTED', 'MCP_SERVER_DETECTED', 'SEMANTIC_DETECTED',
+  'MODEL_LOADED', 'MODEL_AVAILABLE', 'SEMANTIC_LOST', 'GPU_PROCESS_ATTACHED',
+  'GPU_PROCESS_DETACHED', 'SERVICE_STARTED', 'SERVICE_STOPPED', 'SERVICE_STATUS_CHANGED',
+  'CONTAINER_STARTED', 'CONTAINER_STOPPED', 'CONTAINER_CREATED', 'CONTAINER_REMOVED',
+  'WSL_STATE_CHANGED', 'VM_DETECTED', 'VM_STATE_CHANGED', 'VM_LOST',
+])
 
 /**
  * Imperative controller over a single Cytoscape instance. All graph mutations
@@ -494,6 +543,7 @@ export class GraphController {
   private pendingNodeRemoves = new Set<string>()
   private pendingEdgeRemoves = new Set<string>()
   private layoutTimer: number | undefined
+  private familySyncTimer: number | undefined
   private pendingNewNodes = 0
   private filter: Filter = 'all'
   private search = ''
@@ -522,10 +572,7 @@ export class GraphController {
   /** last label actually written per node (avoids redundant cytoscape
    * dirtying on every metrics tick — v0.3.1 large-graph optimization) */
   private labelCache = new Map<string, string>()
-  // ---- v1.0.1 camera/viewport ------------------------------------------
-  /** true once the blank-graph safety recovery has run (view-only, once —
-   * must never fight the user's own pan/zoom after initial placement). */
-  private safetyRecovered = false
+  // ---- camera/viewport -------------------------------------------------
   /** layout lifecycle state (surfaced by viewportHealth()) */
   private layoutState: 'idle' | 'active' = 'idle'
   /** v1.0.2 rack composition shape (surfaced by topologyMetrics()) */
@@ -533,6 +580,17 @@ export class GraphController {
   private rackRows = 0
   /** v1.0.2 final pass: semantic composition zones (model space). */
   private zoneLayout: ZoneInfo[] = []
+  /** Deterministic per-view geometry. Metric ticks never invalidate it. */
+  private viewLayoutCache = new Map<string, ViewLayoutCacheEntry>()
+  private topologyRevision = 0
+  private layoutCacheHits = 0
+  private layoutCacheMisses = 0
+  private cameraRaf = 0
+  private cameraRaf2 = 0
+  private cameraToken = 0
+  private interactionTimer: number | undefined
+  private interacting = false
+  private lastFitMs = 0
   /** keeps the cytoscape renderer glued to the shell's final dimensions */
   private resizeObs: ResizeObserver | undefined
 
@@ -550,7 +608,10 @@ export class GraphController {
       this.resizeObs = new ResizeObserver(() => cy.resize())
       this.resizeObs.observe(container)
     }
-    cy.on('add', 'node', () => {
+    cy.on('add', 'node', (ev) => {
+      // Derived family cards are a view projection, not topology churn. Counting
+      // them here used to trigger a second full composition on every family sync.
+      if (ev.target.data('family')) return
       this.pendingNewNodes += 1
       this.scheduleIncrementalLayout()
     })
@@ -562,6 +623,8 @@ export class GraphController {
       this.updateCompactMode()
       this.updateEdgeLod()
     })
+    cy.on('pan zoom drag', this.markInteraction)
+    cy.on('free', this.markInteraction)
     perf.setGraphSource({
       nodes: () => this.cy.nodes().length,
       edges: () => this.cy.edges().length,
@@ -570,7 +633,27 @@ export class GraphController {
       particles: () => this.overlay.stats().particles,
       overlayRunning: () => this.overlay.stats().running,
       overlayActivity: () => this.overlay.stats().activity,
+      mountedCards: () => Number(this.cy.container()?.querySelector('.graph-card-layer')?.getAttribute('data-mounted') ?? 0),
+      graphAspectRatio: () => this.currentGeometry().graphAspectRatio,
+      viewportAspectRatio: () => this.currentGeometry().viewportAspectRatio,
+      layoutCacheHits: () => this.layoutCacheHits,
+      layoutCacheMisses: () => this.layoutCacheMisses,
+      fitMs: () => this.lastFitMs,
     })
+  }
+
+  private markInteraction = (): void => {
+    if (!this.interacting) {
+      this.interacting = true
+      this.cy.container()?.dispatchEvent(new CustomEvent('esw:interaction', { detail: { active: true } }))
+    }
+    if (this.interactionTimer !== undefined) window.clearTimeout(this.interactionTimer)
+    this.interactionTimer = window.setTimeout(() => {
+      this.interactionTimer = undefined
+      this.interacting = false
+      this.cy.container()?.dispatchEvent(new CustomEvent('esw:interaction', { detail: { active: false } }))
+      this.refreshCardOverlay()
+    }, 160)
   }
 
   /** TEST-ONLY benchmark mode flag (set from the WS snapshot mode). */
@@ -586,6 +669,9 @@ export class GraphController {
     this.familyView = mode
     if (mode === 'families') this.syncFamilyView()
     else this.teardownFamilyView()
+    this.applyFilter()
+    this.composeCurrentView()
+    this.scheduleCamera('current')
   }
 
   setTelemetry(t: TelemetryInfo | undefined): void {
@@ -1114,6 +1200,7 @@ export class GraphController {
 
   replaceAll(nodes: TopoNode[], edges: TopoEdge[]): void {
     const t0 = performance.now()
+    this.invalidateTopology()
     this.pendingNodeRemoves.clear()
     this.pendingEdgeRemoves.clear()
     this.cy.batch(() => {
@@ -1156,7 +1243,12 @@ export class GraphController {
     this.refreshLabels()
     this.updateEdgeLod()
     this.runLayout('initial')
-    if (this.familyView === 'families') this.syncFamilyView()
+    if (this.familyView === 'families') {
+      this.syncFamilyView()
+      this.applyFilter()
+      this.composeCurrentView(true)
+      this.scheduleCamera('current')
+    }
     if (this.focusNode) this.applyFocus()
     if (this.view !== 'system') this.applyView()
     perf.recordUpdate(performance.now() - t0)
@@ -1167,6 +1259,8 @@ export class GraphController {
     const flat = { ...rest, ...data } as Record<string, unknown>
     const rawTitle = data.display_name ?? data.name ?? data.model_id ?? data.address ?? rest.label ?? n.id
     flat.cardTitle = String(rawTitle ?? n.id).replace(/\s+/g, ' ').split(' · ')[0].slice(0, 30)
+    const kind = String(data.kind ?? rest.kind ?? '')
+    flat.cardGlyph = kind === 'SERVICE' ? '■' : kind === 'PROCESS' ? '•' : kind === 'LISTENING_PORT' ? '◆' : '◇'
     return flat
   }
 
@@ -1293,7 +1387,12 @@ export class GraphController {
         this.fadeRemoveNode(String(ev.metadata?.node_id ?? ev.source))
         break
     }
-    if (this.familyView === 'families') this.syncFamilyView()
+    if (this.familyView === 'families') {
+      if (ev.event_type === 'PROCESS_METRICS_UPDATED') this.updateFamilyMetricsForMember(ev.source)
+      else if (TOPOLOGY_EVENT_TYPES.has(ev.event_type)) {
+        this.scheduleFamilySync()
+      }
+    }
     if (this.focusNode) this.applyFocus()
     if (this.view !== 'system') this.applyView()
   }
@@ -1311,6 +1410,7 @@ export class GraphController {
       return
     }
     const data = this.flattenNode(node)
+    this.invalidateTopology()
     if (born) data.born = true
     // place new nodes near a real neighbor when known (topology coherence),
     // otherwise near the current view center so they join the visible graph
@@ -1338,7 +1438,7 @@ export class GraphController {
       if (members) {
         const el = this.cy.getElementById(node.id)
         if (el.length) el.addClass('fam-hidden')
-        this.syncFamilyView()
+        this.scheduleFamilySync()
       }
     }
   }
@@ -1362,6 +1462,7 @@ export class GraphController {
         existing.data('recent', true)
       })
     } else {
+      this.invalidateTopology()
       this.cy.add({
         group: 'edges',
         data: { ...edge, portLabel: portLabel(edge.ports), recent: true },
@@ -1404,7 +1505,10 @@ export class GraphController {
       if (this.pendingEdgeRemoves.has(edgeId)) {
         this.pendingEdgeRemoves.delete(edgeId)
         const cur = this.cy.getElementById(edgeId)
-        if (cur.length) cur.remove()
+        if (cur.length) {
+          cur.remove()
+          this.invalidateTopology()
+        }
       }
     }, 600)
   }
@@ -1420,7 +1524,10 @@ export class GraphController {
       if (this.pendingNodeRemoves.has(nodeId)) {
         this.pendingNodeRemoves.delete(nodeId)
         const cur = this.cy.getElementById(nodeId)
-        if (cur.length) cur.remove()
+        if (cur.length) {
+          cur.remove()
+          this.invalidateTopology()
+        }
       }
     }, 600)
   }
@@ -1494,7 +1601,7 @@ export class GraphController {
 
   /** Far zoom = wireframe: translucent fills so dense clusters stay legible. */
   private updateCompactMode(): void {
-    const compact = this.cy.zoom() < 0.3
+    const compact = this.cy.zoom() < ZOOM_FAR
     if (compact === this.compactMode) return
     this.compactMode = compact
     this.cy.batch(() => {
@@ -1549,6 +1656,35 @@ export class GraphController {
       .nodes('[kind = "PROCESS"]')
       .filter((c) => c.data('parent_sid') === parent && c.id() !== parent)
     return kids.length >= 2 ? parent : undefined
+  }
+
+  /** Metric-only family refresh. Avoids the old O(nodes + edges) family
+   * rebuild on every PROCESS_METRICS_UPDATED event. */
+  private updateFamilyMetricsForMember(sid: string): void {
+    const families = this.cy.nodes('[?family]')
+    let family: NodeSingular | null = null
+    families.forEach((candidate) => {
+      if (family) return
+      const members = (candidate.data('member_ids') as string[] | undefined) ?? []
+      if (members.includes(sid)) family = candidate as NodeSingular
+    })
+    if (!family) return
+    const members = ((family as NodeSingular).data('member_ids') as string[] | undefined) ?? []
+    let cpu = 0
+    let memory = 0
+    let connections = 0
+    for (const memberId of members) {
+      const member = this.cy.getElementById(memberId)
+      if (!member.length) continue
+      cpu += Number(member.data('cpu_percent') ?? 0)
+      memory += Number(member.data('memory_mb') ?? 0)
+      connections += Number(member.data('conn_count') ?? 0)
+    }
+    this.cy.batch(() => {
+      ;(family as NodeSingular).data('cpu_percent', cpu)
+      ;(family as NodeSingular).data('memory_mb', memory)
+      ;(family as NodeSingular).data('conn_count', connections)
+    })
   }
 
   private syncFamilyView(): void {
@@ -1661,11 +1797,18 @@ export class GraphController {
         if (!memberSet.has(s) && !memberSet.has(t)) e.removeClass('fam-hidden')
       })
     })
-    if (this.pendingNewNodes > 0) {
-      const batch = this.pendingNewNodes
-      this.pendingNewNodes = 0
-      this.runLayout('incremental', batch)
-    }
+  }
+
+  /** Coalesce bursty lifecycle events into one family projection refresh.
+   * A busy socket feed previously rebuilt the whole projection per event. */
+  private scheduleFamilySync(): void {
+    if (this.familySyncTimer !== undefined) return
+    this.familySyncTimer = window.setTimeout(() => {
+      this.familySyncTimer = undefined
+      if (this.familyView !== 'families') return
+      this.syncFamilyView()
+      if (this.filter !== 'all') this.applyFilter()
+    }, 350)
   }
 
   private teardownFamilyView(): void {
@@ -1729,6 +1872,197 @@ export class GraphController {
     const name = String(el.data('name') ?? '')
     const count = (el.data('member_ids') as string[] | undefined)?.length ?? 0
     el.data('label', `${name} ×${count}`)
+  }
+
+  private invalidateTopology(): void {
+    this.topologyRevision += 1
+    this.viewLayoutCache.clear()
+  }
+
+  private targetViewportAspect(): number {
+    const width = Math.max(1, this.cy.width())
+    const height = Math.max(1, this.cy.height())
+    return Math.max(1.55, Math.min(1.95, width / height))
+  }
+
+  private viewLayoutKey(): string {
+    return `${this.filter}:${this.familyView}`
+  }
+
+  private nodeSignature(nodes: cytoscape.NodeCollection): string {
+    const ids = nodes.map((node) => node.id()).sort()
+    let hash = 2166136261
+    for (const id of ids) {
+      for (let i = 0; i < id.length; i++) {
+        hash ^= id.charCodeAt(i)
+        hash = Math.imul(hash, 16777619)
+      }
+    }
+    return `${ids.length}:${hash >>> 0}`
+  }
+
+  private storeViewLayout(
+    key: string,
+    nodes: cytoscape.NodeCollection,
+    zones: ZoneInfo[],
+    columns: number,
+    rows: number,
+  ): void {
+    const positions = new Map<string, { x: number; y: number }>()
+    nodes.forEach((node) => {
+      const p = node.position()
+      positions.set(node.id(), { x: p.x, y: p.y })
+    })
+    this.viewLayoutCache.set(key, {
+      revision: this.topologyRevision,
+      signature: this.nodeSignature(nodes),
+      positions,
+      zones: zones.map((zone) => ({ ...zone })),
+      columns,
+      rows,
+    })
+  }
+
+  private restoreViewLayout(key: string, nodes: cytoscape.NodeCollection): boolean {
+    const cached = this.viewLayoutCache.get(key)
+    if (!cached || cached.revision !== this.topologyRevision || cached.signature !== this.nodeSignature(nodes)) {
+      this.layoutCacheMisses += 1
+      return false
+    }
+    this.cy.batch(() => {
+      nodes.forEach((node) => {
+        const p = cached.positions.get(node.id())
+        if (p) node.position(p)
+      })
+    })
+    this.zoneLayout = cached.zones.map((zone) => ({ ...zone }))
+    this.rackColumns = cached.columns
+    this.rackRows = cached.rows
+    this.layoutCacheHits += 1
+    this.cy.container()?.dispatchEvent(new CustomEvent('esw:layout'))
+    return true
+  }
+
+  /** Compact deterministic layout for the CURRENT visible representation.
+   * Hidden inventory keeps its full-layout coordinates and is never deleted. */
+  private composeCurrentView(force = false): void {
+    this.cy.style().update()
+    const nodes = this.cy.nodes(':visible')
+    if (!nodes.length) return
+    const key = this.viewLayoutKey()
+    if (!force && this.restoreViewLayout(key, nodes)) return
+    const t0 = performance.now()
+    if (key === 'all:nodes') {
+      this.composeRackLayout()
+      perf.recordLayout(performance.now() - t0)
+      return
+    }
+
+    const visibleIds = new Set(nodes.map((node) => node.id()))
+    const degree = new Map<string, number>()
+    this.cy.edges(':visible').forEach((edge) => {
+      const source = edge.source().id()
+      const target = edge.target().id()
+      if (!visibleIds.has(source) || !visibleIds.has(target)) return
+      degree.set(source, (degree.get(source) ?? 0) + 1)
+      degree.set(target, (degree.get(target) ?? 0) + 1)
+    })
+    const priority = (node: NodeSingular): number => {
+      const kind = String(node.data('kind') ?? '')
+      if (kind === 'SYSTEM' || kind === 'GPU' || kind === 'SEMANTIC' || kind === 'LOCAL_LLM') return 0
+      if (node.data('family')) return 1
+      if ((degree.get(node.id()) ?? 0) > 0) return 2
+      return 3
+    }
+    const ordered = nodes.toArray().sort((a, b) =>
+      priority(a) - priority(b) ||
+      (degree.get(b.id()) ?? 0) - (degree.get(a.id()) ?? 0) ||
+      a.id().localeCompare(b.id()),
+    )
+    const targetAspect = this.targetViewportAspect()
+    let columns = 1
+    let delta = Number.POSITIVE_INFINITY
+    for (let candidate = 1; candidate <= Math.min(36, ordered.length); candidate++) {
+      const rows = Math.ceil(ordered.length / candidate)
+      const width = (candidate - 1) * CARD_PITCH_X + 184
+      const height = (rows - 1) * CARD_PITCH_Y + 64
+      const next = Math.abs(width / Math.max(1, height) - targetAspect)
+      if (next < delta) {
+        delta = next
+        columns = candidate
+      }
+    }
+    const rows = Math.max(1, Math.ceil(ordered.length / columns))
+    this.cy.batch(() => {
+      ordered.forEach((node, index) => {
+        const column = index % columns
+        const row = Math.floor(index / columns)
+        let hash = 0
+        for (let i = 0; i < node.id().length; i++) hash = (hash * 31 + node.id().charCodeAt(i)) | 0
+        node.position({
+          x: column * CARD_PITCH_X + ((hash >>> 4) % 9) - 4,
+          y: row * CARD_PITCH_Y + ((hash >>> 9) % 7) - 3,
+        })
+        node.data('rackBand', column)
+      })
+    })
+    const label = `${this.filter.toUpperCase()} · ${this.familyView.toUpperCase()} · CURRENT VISIBLE TOPOLOGY`
+    const width = Math.max(184, (columns - 1) * CARD_PITCH_X + 184)
+    this.zoneLayout = [{ label, role: 'filtered-view', x0: -12, x1: width + 12, y0: -50 }]
+    this.rackColumns = columns
+    this.rackRows = rows
+    this.storeViewLayout(key, nodes, this.zoneLayout, columns, rows)
+    this.cy.container()?.dispatchEvent(new CustomEvent('esw:layout'))
+    perf.recordLayout(performance.now() - t0)
+  }
+
+  private scheduleCamera(target: CameraTarget): void {
+    const token = ++this.cameraToken
+    if (this.cameraRaf) cancelAnimationFrame(this.cameraRaf)
+    if (this.cameraRaf2) cancelAnimationFrame(this.cameraRaf2)
+    this.cameraRaf = requestAnimationFrame(() => {
+      this.cameraRaf = 0
+      this.cameraRaf2 = requestAnimationFrame(() => {
+        this.cameraRaf2 = 0
+        if (token !== this.cameraToken) return
+        const t0 = performance.now()
+        this.cy.resize()
+        this.cy.style().update()
+        const overview = this.cy.nodes('.overview-node:visible')
+        // Curved edge control points can extend far outside their endpoints;
+        // including them in fit() recreated the thin horizontal-strip bug.
+        // Framing the visible nodes still frames the full truthful topology.
+        const elements = target === 'overview' && overview.length
+          ? overview
+          : this.cy.nodes(':visible')
+        if (!elements.length) return
+        this.cy.fit(elements, target === 'overview' ? 54 : 62)
+        if (target === 'overview' && this.cy.zoom() > 0.92) {
+          this.cy.zoom({
+            level: 0.92,
+            renderedPosition: { x: this.cy.width() / 2, y: this.cy.height() / 2 },
+          } as unknown as ZoomOptions)
+        }
+        this.lastFitMs = performance.now() - t0
+        perf.recordFit(this.lastFitMs)
+        this.refreshCardOverlay()
+        this.cy.container()?.dispatchEvent(new CustomEvent('esw:layout'))
+      })
+    })
+  }
+
+  private currentGeometry(): { graphAspectRatio: number; viewportAspectRatio: number; viewportCoverage: number } {
+    const nodes = this.cy.nodes(':visible')
+    const bb = nodes.length ? nodes.boundingBox() : null
+    const width = Math.max(1, this.cy.width())
+    const height = Math.max(1, this.cy.height())
+    const graphAspectRatio = bb && bb.h > 0 ? bb.w / bb.h : 0
+    const renderedArea = bb ? (bb.w * this.cy.zoom()) * (bb.h * this.cy.zoom()) : 0
+    return {
+      graphAspectRatio: Number(graphAspectRatio.toFixed(3)),
+      viewportAspectRatio: Number((width / height).toFixed(3)),
+      viewportCoverage: Number(Math.min(1, renderedArea / (width * height)).toFixed(3)),
+    }
   }
 
   /**
@@ -1859,12 +2193,11 @@ export class GraphController {
       return ac !== bc ? bc - ac : byName(a, b)
     })
 
-    // 4) Build two camera-ready fields from the most operationally relevant
-    //    real nodes. The rest continue into large adjacent archives.
-    const OVERVIEW_COLUMNS = 6
+    // 4) Viewport-aware rack geometry. v1.0.2 used fixed eight/nine-row
+    // column banks, so hundreds of nodes produced an 8:1+ horizontal strip.
+    // Solve the total column count against the real viewport aspect and the
+    // actual population in each semantic zone instead.
     const OVERVIEW_ZONE_SIZE = 24
-    const PITCH_X = 232
-    const PITCH_Y = 88
     const strHash = (s: string): number => {
       let h = 0
       for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
@@ -1902,10 +2235,37 @@ export class GraphController {
     const remainingServices = banked.filter((nd) => !used.has(nd.id()))
     const remainingBackground = orphanN.filter((nd) => !used.has(nd.id()))
 
+    const targetAspect = this.targetViewportAspect()
+    const maxCandidate = Math.min(52, Math.max(16, Math.ceil(Math.sqrt(n) * 2.2)))
+    let totalColumns = 16
+    let bestDelta = Number.POSITIVE_INFINITY
+    for (let candidate = 12; candidate <= maxCandidate; candidate++) {
+      const leftColumns = Math.max(5, Math.floor(candidate / 2))
+      const rightColumns = Math.max(5, candidate - leftColumns)
+      const overviewRows = Math.max(
+        Math.ceil(overviewA.length / leftColumns),
+        Math.ceil(overviewB.length / rightColumns),
+        1,
+      )
+      const mainRows = Math.max(
+        Math.ceil(remainingConnected.length / leftColumns),
+        Math.ceil(remainingServices.length / rightColumns),
+        1,
+      )
+      const backgroundRows = Math.max(1, Math.ceil(remainingBackground.length / candidate))
+      const width = (candidate - 1) * CARD_PITCH_X + 184 + VIEW_GAP_X
+      const height = (overviewRows + mainRows + backgroundRows) * CARD_PITCH_Y + VIEW_GAP_Y * 2
+      const delta = Math.abs(width / Math.max(1, height) - targetAspect)
+      if (delta < bestDelta) {
+        bestDelta = delta
+        totalColumns = candidate
+      }
+    }
+    const leftColumns = Math.max(5, Math.floor(totalColumns / 2))
+    const rightColumns = Math.max(5, totalColumns - leftColumns)
+    const rightX = leftColumns * CARD_PITCH_X + VIEW_GAP_X
     const posMap = new Map<string, { x: number; y: number }>()
     const zoneLayout: ZoneInfo[] = []
-    let maxColumn = 0
-    let maxRow = 0
     const place = (
       list: NodeSingular[],
       role: string,
@@ -1913,76 +2273,72 @@ export class GraphController {
       x0: number,
       y0: number,
       columns: number,
-      rowMajor: boolean,
       overview = false,
     ): { width: number; height: number } => {
       if (!list.length) return { width: 0, height: 0 }
-      const rows = rowMajor ? Math.ceil(list.length / columns) : columns
-      const cols = rowMajor ? Math.min(columns, list.length) : Math.ceil(list.length / rows)
+      const safeColumns = Math.max(1, columns)
+      const rows = Math.ceil(list.length / safeColumns)
+      const cols = Math.min(safeColumns, list.length)
       list.forEach((nd, i) => {
-        const c = rowMajor ? i % columns : Math.floor(i / rows)
-        const r = rowMajor ? Math.floor(i / columns) : i % rows
+        const c = i % safeColumns
+        const r = Math.floor(i / safeColumns)
         const h = strHash(nd.id())
         const jx = ((h >>> 4) % 17) - 8
         const jy = ((h >>> 9) % 13) - 6
-        posMap.set(nd.id(), { x: x0 + c * PITCH_X + jx, y: y0 + r * PITCH_Y + jy })
+        posMap.set(nd.id(), { x: x0 + c * CARD_PITCH_X + jx, y: y0 + r * CARD_PITCH_Y + jy })
         if (overview) nd.scratch('_overview', true)
-        maxColumn = Math.max(maxColumn, Math.round((x0 + c * PITCH_X) / PITCH_X))
-        maxRow = Math.max(maxRow, Math.round((y0 + r * PITCH_Y) / PITCH_Y))
       })
-      const width = Math.max(184, (cols - 1) * PITCH_X + 184)
-      const height = Math.max(64, (rows - 1) * PITCH_Y + 64)
+      const width = Math.max(184, (cols - 1) * CARD_PITCH_X + 184)
+      const height = Math.max(64, (rows - 1) * CARD_PITCH_Y + 64)
       zoneLayout.push({ label, role, x0: x0 - 12, x1: x0 + width + 12, y0: y0 - 50 })
       return { width, height }
     }
 
-    place(
+    const overviewShapeA = place(
       overviewA,
       'overview-primary',
       'LIVE SYSTEM TOPOLOGY  ·  OBSERVED PROCESSES, LINKS & PROVIDERS',
       0,
       0,
-      OVERVIEW_COLUMNS,
-      true,
+      leftColumns,
       true,
     )
-    place(
+    const overviewShapeB = place(
       overviewB,
       'overview-secondary',
       'SYSTEM CUSTODY  ·  SERVICES, INFRASTRUCTURE & ACTIVE WORKLOADS',
+      rightX,
       0,
-      380,
-      OVERVIEW_COLUMNS,
-      true,
+      rightColumns,
       true,
     )
+    const overviewHeight = Math.max(overviewShapeA.height, overviewShapeB.height)
+    const mainY = overviewHeight + VIEW_GAP_Y
     const connectedShape = place(
       remainingConnected,
       'core',
       'CONNECTED CORE  ·  EXTENDED LIVE GRAPH',
       0,
-      850,
-      8,
-      false,
+      mainY,
+      leftColumns,
     )
-    const servicesX = Math.max(1900, connectedShape.width + 250)
-    place(
+    const servicesShape = place(
       remainingServices,
       'banked',
       'SERVICE REGISTRY  ·  RUNNING & STOPPED',
-      servicesX,
-      850,
-      8,
-      false,
+      rightX,
+      mainY,
+      rightColumns,
     )
+    const mainHeight = Math.max(connectedShape.height, servicesShape.height)
+    const backgroundY = mainY + mainHeight + VIEW_GAP_Y
     place(
       remainingBackground,
       'orphan',
       'BACKGROUND WORKLOADS  ·  UNLINKED PROCESS INVENTORY',
       0,
-      1700,
-      9,
-      false,
+      backgroundY,
+      totalColumns,
     )
 
     // 5) Write positions and visual role metadata in one batch.
@@ -1991,7 +2347,7 @@ export class GraphController {
         const pos = posMap.get(nd.id())
         if (pos) nd.position(pos)
         const originalRole = roleOf(nd as NodeSingular)
-        nd.data('rackBand', pos ? Math.round(pos.x / PITCH_X) : 0)
+        nd.data('rackBand', pos ? Math.round(pos.x / CARD_PITCH_X) : 0)
         nd.removeClass('svc-bank orphan-bank core-node anchor-node overview-node')
         if (originalRole === 'banked') nd.addClass('svc-bank')
         else if (originalRole === 'orphan') nd.addClass('orphan-bank')
@@ -2004,8 +2360,9 @@ export class GraphController {
       })
     })
     this.zoneLayout = zoneLayout
-    this.rackColumns = maxColumn + 1
-    this.rackRows = maxRow + 1
+    this.rackColumns = totalColumns
+    this.rackRows = Math.max(1, Math.ceil((backgroundY + Math.max(64, Math.ceil(remainingBackground.length / totalColumns) * CARD_PITCH_Y)) / CARD_PITCH_Y))
+    this.storeViewLayout('all:nodes', nodes, zoneLayout, this.rackColumns, this.rackRows)
     cy.container()?.dispatchEvent(new CustomEvent('esw:layout'))
   }
 
@@ -2017,7 +2374,7 @@ export class GraphController {
       const t0 = performance.now()
       this.layoutState = 'active'
       try {
-        this.composeRackLayout()
+        this.composeCurrentView(true)
         delete this.cy.container()?.dataset.composeError
       } catch (e) {
         console.error('[v1.0.2] composeRackLayout failed', e)
@@ -2029,8 +2386,9 @@ export class GraphController {
       }
       this.layoutState = 'idle'
       perf.recordLayout(performance.now() - t0)
-      this.fitOverview()
-      this.safetyRecover()
+      // Wait until Cytoscape and the overlay have observed their final shell
+      // size. The old synchronous fit was calculated against stale geometry.
+      this.scheduleCamera('current')
       return
     }
     // incremental: small additions on any graph keep positions; on a large
@@ -2042,7 +2400,8 @@ export class GraphController {
       const t0 = performance.now()
       this.layoutState = 'active'
       try {
-        this.composeRackLayout()
+        if (this.viewLayoutKey() === 'all:nodes') this.composeRackLayout()
+        else this.composeCurrentView(true)
       } catch {
         this.cy.layout({ name: 'cose', animate: false } as never).run()
       }
@@ -2083,7 +2442,8 @@ export class GraphController {
 
   /** Manual RELAYOUT: re-run the initial layout (fit + randomize). */
   relayout(): void {
-    this.runLayout('initial')
+    this.composeCurrentView(true)
+    this.scheduleCamera('current')
   }
 
   /** Semantic composition zones for the wire underlay (model space). */
@@ -2097,51 +2457,14 @@ export class GraphController {
    * off-screen. This is what the toolbar FIT button must mean.
    */
   fit(): void {
-    const eles = this.cy.elements(':visible')
-    if (eles.length) this.cy.fit(eles, 40)
+    this.composeCurrentView()
+    this.scheduleCamera('current')
   }
 
   /** Frame the operational cross-section. FIT ALL remains the explicit way
    * to frame the complete machine inventory. */
   fitOverview(): void {
-    const overview = this.cy.nodes('.overview-node:visible')
-    const eles = overview.length ? overview : this.cy.nodes(':visible')
-    if (!eles.length) return
-    this.cy.fit(eles, 54)
-    // Large displays should not inflate the cards beyond their intended
-    // control-room scale; compact displays keep the true fit.
-    if (this.cy.zoom() > 0.92) {
-      this.cy.zoom({
-        level: 0.92,
-        renderedPosition: { x: this.cy.width() / 2, y: this.cy.height() / 2 },
-      } as unknown as ZoomOptions)
-    }
-  }
-
-  /**
-   * Blank-graph safety recovery (v1.0.1): after the initial layout + fit, if
-   * the graph has visible nodes but NONE intersect the viewport, perform ONE
-   * view-only correction (resize, then re-fit the visible elements). Runs a
-   * single time per controller and never re-arms — it must not fight the
-   * user's own pan/zoom after initial placement.
-   */
-  private safetyRecover(): void {
-    if (this.safetyRecovered) return
-    this.safetyRecovered = true
-    const cy = this.cy
-    const vis = cy.nodes(':visible')
-    if (!vis.length) return
-    const W = cy.width()
-    const H = cy.height()
-    let inView = 0
-    vis.forEach((nn) => {
-      const p = nn.renderedPosition()
-      if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) inView++
-    })
-    if (inView > 0) return
-    cy.resize()
-    const eles = cy.elements(':visible')
-    if (eles.length) cy.fit(eles, 40)
+    this.scheduleCamera('overview')
   }
 
   /** Read-only viewport/graph health diagnostic (acceptance + debugging):
@@ -2157,6 +2480,8 @@ export class GraphController {
       if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) viewportNodes++
     })
     const visBB = vis.length ? vis.boundingBox() : null
+    const geometry = this.currentGeometry()
+    const mountedCards = Number(cy.container()?.querySelector('.graph-card-layer')?.getAttribute('data-mounted') ?? 0)
     return {
       totalNodes: cy.nodes().length,
       visibleNodes: vis.length,
@@ -2166,10 +2491,18 @@ export class GraphController {
       zoom: cy.zoom(),
       pan: { x: cy.pan().x, y: cy.pan().y },
       graphBoundingBox: visBB
-        ? { x1: visBB.x1, y1: visBB.y1, x2: visBB.x2, y2: visBB.y2 }
+        ? { x1: visBB.x1, y1: visBB.y1, x2: visBB.x2, y2: visBB.y2, width: visBB.w, height: visBB.h }
         : null,
       containerWidth: W,
       containerHeight: H,
+      graphAspectRatio: geometry.graphAspectRatio,
+      viewportAspectRatio: geometry.viewportAspectRatio,
+      viewportCoverage: geometry.viewportCoverage,
+      mountedCards,
+      lod: this.zoomBucket,
+      fitMs: Number(this.lastFitMs.toFixed(2)),
+      layoutCacheHits: this.layoutCacheHits,
+      layoutCacheMisses: this.layoutCacheMisses,
       layoutState: this.layoutState,
     }
   }
@@ -2239,6 +2572,7 @@ export class GraphController {
     const coreClass = cy.nodes('.core-node').length
     const visibleNodes = cy.nodes(':visible').length
     const visibleEdges = cy.edges(':visible').length
+    const geometry = this.currentGeometry()
     return {
       totalNodes: nn,
       totalEdges: ee,
@@ -2258,6 +2592,13 @@ export class GraphController {
       coreClassNodes: coreClass,
       rackColumns: this.rackColumns,
       rackRows: this.rackRows,
+      graphAspectRatio: geometry.graphAspectRatio,
+      viewportAspectRatio: geometry.viewportAspectRatio,
+      viewportCoverage: geometry.viewportCoverage,
+      mountedCards: Number(cy.container()?.querySelector('.graph-card-layer')?.getAttribute('data-mounted') ?? 0),
+      layoutCacheHits: this.layoutCacheHits,
+      layoutCacheMisses: this.layoutCacheMisses,
+      fitMs: Number(this.lastFitMs.toFixed(2)),
       zoom: cy.zoom(),
       layoutState: this.layoutState,
     }
@@ -2277,6 +2618,8 @@ export class GraphController {
     this.filter = filter
     const t0 = performance.now()
     this.applyFilter()
+    this.composeCurrentView()
+    this.scheduleCamera('current')
     perf.recordFilter(performance.now() - t0)
   }
 
@@ -2284,6 +2627,10 @@ export class GraphController {
     const f = this.filter
     const nodes = this.cy.nodes()
     const edges = this.cy.edges()
+    // Remove only the display bypass used by the previous filtered/family
+    // projection. Other LOD styling remains stylesheet/canvas-driven.
+    nodes.removeStyle('display')
+    edges.removeStyle('display')
     this.cy.batch(() => {
       nodes.removeData('hidden')
       edges.removeData('hidden')
@@ -2327,6 +2674,13 @@ export class GraphController {
     // elements stay visually hidden. `cy.style().update()` forces the pass
     // (must run OUTSIDE the batch; a batched pass skips hidden elements).
     this.cy.style().update()
+    // Explicit display bypasses make visibility deterministic across
+    // Cytoscape renderer/style-cache versions. They are removed above on the
+    // next filter pass, so hidden inventory is never deleted or stranded.
+    this.cy.nodes('.fam-hidden').style('display', 'none')
+    this.cy.edges('.fam-hidden').style('display', 'none')
+    nodes.filter('[?hidden]').style('display', 'none')
+    edges.filter('[?hidden]').style('display', 'none')
     this.refreshCardOverlay()
   }
 
@@ -2513,10 +2867,19 @@ export class GraphController {
       window.clearTimeout(this.layoutTimer)
       this.layoutTimer = undefined
     }
+    if (this.familySyncTimer !== undefined) {
+      window.clearTimeout(this.familySyncTimer)
+      this.familySyncTimer = undefined
+    }
     if (this.activityDecayTimer !== undefined) {
       clearInterval(this.activityDecayTimer)
       this.activityDecayTimer = undefined
     }
+    if (this.cameraRaf) cancelAnimationFrame(this.cameraRaf)
+    if (this.cameraRaf2) cancelAnimationFrame(this.cameraRaf2)
+    if (this.interactionTimer !== undefined) window.clearTimeout(this.interactionTimer)
+    this.cy.off('pan zoom drag', this.markInteraction)
+    this.cy.off('free', this.markInteraction)
     this.resizeObs?.disconnect()
     this.resizeObs = undefined
     this.selBoxCleanup?.()

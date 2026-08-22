@@ -1,6 +1,8 @@
 import type { Core, EventObjectNode, NodeSingular } from 'cytoscape'
+import { perf } from './PerfMonitor'
 
 type Tone = 'cyan' | 'blue' | 'green' | 'amber' | 'magenta' | 'violet' | 'red'
+type LodMode = 'near' | 'mid' | 'far'
 
 interface CardRecord {
   root: HTMLDivElement
@@ -154,9 +156,15 @@ export class CardOverlay {
   private cards = new Map<string, CardRecord>()
   private raf = 0
   private destroyed = false
-  private detailMode: boolean | null = null
+  private lodMode: LodMode | null = null
+  private interacting = false
+  private creates = 0
+  private updates = 0
+  private removals = 0
 
-  private static readonly DETAIL_ZOOM = 0.36
+  private static readonly NEAR_ZOOM = 0.5
+  private static readonly MID_ZOOM = 0.09
+  private static readonly MAX_NEAR_CARDS = 180
 
   constructor(
     private cy: Core,
@@ -168,6 +176,7 @@ export class CardOverlay {
     this.container.addEventListener('esw:layout', this.requestDraw)
     this.container.addEventListener('esw:cards-refresh', this.requestDraw)
     this.container.addEventListener('esw:signal', this.onSignal)
+    this.container.addEventListener('esw:interaction', this.onInteraction)
     cy.on('pan zoom resize', this.requestDraw)
     cy.on('position', 'node', this.requestDraw)
     cy.on('add data', 'node', this.onNodeChange)
@@ -183,6 +192,7 @@ export class CardOverlay {
   }
 
   private onNodeChange = (ev: EventObjectNode): void => {
+    if (this.interacting || this.lodMode !== 'near') return
     const record = this.cards.get(ev.target.id())
     if (record) this.updateContent(record, ev.target)
     else if (ev.type === 'add') this.requestDraw()
@@ -226,6 +236,7 @@ export class CardOverlay {
     )
     this.cards.set(node.id(), record)
     this.root.appendChild(root)
+    this.creates += 1
     this.updateContent(record, node)
     return record
   }
@@ -239,6 +250,7 @@ export class CardOverlay {
     const detail = detailFor(node)
     const signature = `${tone}\u0000${code}\u0000${icon}\u0000${title}\u0000${metric}\u0000${detail}`
     if (record.signature === signature) return
+    this.updates += 1
     record.signature = signature
     record.root.dataset.tone = tone
     record.code.textContent = code
@@ -254,6 +266,7 @@ export class CardOverlay {
     if (record.signalTimer !== undefined) window.clearTimeout(record.signalTimer)
     record.root.remove()
     this.cards.delete(id)
+    this.removals += 1
   }
 
   private clearCards(): void {
@@ -262,7 +275,7 @@ export class CardOverlay {
   }
 
   private onSignal = (event: Event): void => {
-    if (!this.detailMode) return
+    if (this.lodMode !== 'near') return
     const detail = (event as CustomEvent<{
       nodeId: string
       phase: 'source' | 'target'
@@ -283,13 +296,26 @@ export class CardOverlay {
     }, detail.phase === 'source' ? 520 : 720)
   }
 
-  private setDetailMode(on: boolean): void {
-    if (this.detailMode === on) return
-    this.detailMode = on
-    this.root.dataset.mode = on ? 'detail' : 'compact'
-    this.container.classList.toggle('graph-low-detail', !on)
-    this.cy.batch(() => this.cy.nodes().toggleClass('card-lod', !on))
-    if (!on) this.clearCards()
+  private onInteraction = (event: Event): void => {
+    this.interacting = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    this.root.dataset.interacting = this.interacting ? 'true' : 'false'
+    this.requestDraw()
+  }
+
+  private setLodMode(mode: LodMode): void {
+    if (this.lodMode === mode) return
+    const modeChanged = this.lodMode !== mode
+    this.lodMode = mode
+    this.root.dataset.mode = mode
+    this.container.classList.toggle('graph-low-detail', mode !== 'near')
+    this.cy.batch(() => {
+      const nodes = this.cy.nodes()
+      nodes.toggleClass('card-lod-near', mode === 'near')
+      nodes.toggleClass('card-lod-mid', mode === 'mid')
+      nodes.toggleClass('card-lod-far', mode === 'far')
+    })
+    this.cy.style().update()
+    if (modeChanged && mode !== 'near') this.clearCards()
   }
 
   private updateState(record: CardRecord, node: NodeSingular): void {
@@ -317,41 +343,79 @@ export class CardOverlay {
 
   private requestDraw = (): void => {
     if (this.destroyed || this.raf) return
+    perf.setOverlayRaf('cards', true)
     this.raf = requestAnimationFrame(() => {
       this.raf = 0
-      this.draw()
+      try { this.draw() } finally { perf.setOverlayRaf('cards', false) }
     })
   }
 
   private draw(): void {
+    const started = performance.now()
     const zoom = this.cy.zoom()
-    this.setDetailMode(zoom >= CardOverlay.DETAIL_ZOOM)
-    if (!this.detailMode) return
+    const mode: LodMode = zoom >= CardOverlay.NEAR_ZOOM
+      ? 'near'
+      : zoom >= CardOverlay.MID_ZOOM ? 'mid' : 'far'
+    this.setLodMode(mode)
+    this.root.dataset.visibleNodes = String(this.cy.nodes(':visible').length)
+    this.root.dataset.zoom = zoom.toFixed(4)
+    const sample = this.cy.nodes(':visible').first()
+    if (sample.length) {
+      this.root.dataset.sampleClasses = sample.classes().join(' ')
+      this.root.dataset.sampleWidth = sample.renderedWidth().toFixed(1)
+      this.root.dataset.sampleHeight = sample.renderedHeight().toFixed(1)
+      this.root.dataset.sampleOpacity = String(sample.style('background-opacity'))
+    }
+    if (mode !== 'near') {
+      perf.recordCardCounts(this.creates, this.updates, this.removals)
+      perf.recordOverlayDraw('card', performance.now() - started)
+      return
+    }
     const margin = 110
     const w = this.container.clientWidth
     const h = this.container.clientHeight
     const wanted = new Set<string>()
-    this.cy.nodes().forEach((node) => {
+    const center = { x: w / 2, y: h / 2 }
+    const candidates: Array<{ node: NodeSingular; x: number; y: number; distance: number }> = []
+    this.cy.nodes(':visible').forEach((node) => {
       if (!node.visible()) return
       const p = node.renderedPosition()
       const onstage = p.x > -margin && p.x < w + margin && p.y > -margin && p.y < h + margin
       if (!onstage) return
+      candidates.push({ node, x: p.x, y: p.y, distance: Math.hypot(p.x - center.x, p.y - center.y) })
+    })
+    candidates.sort((a, b) => a.distance - b.distance || a.node.id().localeCompare(b.node.id()))
+    for (const candidate of candidates.slice(0, CardOverlay.MAX_NEAR_CARDS)) {
+      const { node, x, y } = candidate
       wanted.add(node.id())
-      const record = this.ensureCard(node)
-      const transform = `translate3d(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px, 0) translate(-50%, -50%) scale(${zoom.toFixed(4)})`
+      // While dragging/zooming, mutate transforms only. New DOM mounts,
+      // content writes and pruning wait for the settle event.
+      const record = this.interacting ? this.cards.get(node.id()) : this.ensureCard(node)
+      if (!record) continue
+      const transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -50%) scale(${zoom.toFixed(4)})`
       if (record.transform !== transform) {
         record.transform = transform
         record.root.style.transform = transform
       }
-      this.updateState(record, node)
-    })
-    this.pruneCards(wanted)
+      if (!this.interacting) {
+        this.updateContent(record, node)
+        this.updateState(record, node)
+      }
+    }
+    if (!this.interacting) this.pruneCards(wanted)
     this.root.dataset.mounted = String(this.cards.size)
+    this.root.dataset.cap = String(CardOverlay.MAX_NEAR_CARDS)
+    this.root.dataset.candidates = String(candidates.length)
+    perf.recordCardCounts(this.creates, this.updates, this.removals)
+    const elapsed = performance.now() - started
+    perf.recordOverlayDraw('card', elapsed)
+    if (this.interacting) perf.recordInteractionFrame(elapsed)
   }
 
   destroy(): void {
     this.destroyed = true
     if (this.raf) cancelAnimationFrame(this.raf)
+    perf.setOverlayRaf('cards', false)
     this.cy.off('pan zoom resize', this.requestDraw)
     this.cy.off('position', 'node', this.requestDraw)
     this.cy.off('add data', 'node', this.onNodeChange)
@@ -360,6 +424,7 @@ export class CardOverlay {
     this.container.removeEventListener('esw:layout', this.requestDraw)
     this.container.removeEventListener('esw:cards-refresh', this.requestDraw)
     this.container.removeEventListener('esw:signal', this.onSignal)
+    this.container.removeEventListener('esw:interaction', this.onInteraction)
     this.clearCards()
     this.root.remove()
   }

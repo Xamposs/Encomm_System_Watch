@@ -1650,8 +1650,8 @@ async function main() {
     join(__dirname, '..', 'frontend', 'package.json'), 'utf8'))
   const { existsSync } = await import('node:fs')
   const appOrigin = await cdp.eval(`location.origin`)
-  check('AE1 release version = 1.0.2',
-    relVersion === '1.0.2' && pkg.version === '1.0.2',
+  check('AE1 release version = 1.0.3',
+    relVersion === '1.0.3' && pkg.version === '1.0.3',
     `openapi=${relVersion} package=${pkg.version}`)
   check('AE2 production UI served without Vite (backend://8765, not :5173)',
     appOrigin.startsWith('http://127.0.0.1:8765') && !appOrigin.includes('5173'),
@@ -1670,7 +1670,7 @@ async function main() {
     (await cdp.eval(`document.querySelector('.header')?.innerText ?? ''`)).toUpperCase().includes('READ ONLY'),
     'header carries READ ONLY')
   const files = ['Start-SystemWatch.ps1', 'Start-SystemWatch.bat', 'Setup-SystemWatch.ps1',
-    'docs/RELEASE_1.0.0.md', 'docs/RELEASE_1.0.1.md', 'docs/RELEASE_1.0.2.md', 'docs/ARCHITECTURE.md', 'docs/PHASES.md', 'CHANGELOG.md', 'README.md']
+    'docs/RELEASE_1.0.0.md', 'docs/RELEASE_1.0.1.md', 'docs/RELEASE_1.0.2.md', 'docs/RELEASE_1.0.3.md', 'docs/ARCHITECTURE.md', 'docs/PHASES.md', 'CHANGELOG.md', 'README.md']
   const missing = files.filter(f => !existsSync(join(__dirname, '..', f)))
   check('AE8 release files present (launcher, setup, docs, changelog)',
     missing.length === 0, missing.length ? `missing: ${missing.join(', ')}` : 'all present')
@@ -1737,7 +1737,9 @@ async function main() {
     fitBox.ry1 >= -5 && fitBox.ry2 <= fitBox.H + 5
   check('AF7 FIT ALL keeps all visible topology on-screen (no destructive floor)',
     !!fitsInside, fitBox ? `rendered ${fitBox.rx1.toFixed(0)},${fitBox.ry1.toFixed(0)}-${fitBox.rx2.toFixed(0)},${fitBox.ry2.toFixed(0)} in ${fitBox.W}x${fitBox.H}` : 'n/a')
-  // explicit: FIT ALL must be the TRUE natural fit of the visible topology —
+  // explicit: FIT ALL must be the TRUE natural fit of the visible NODE
+  // topology. Curved edge control points are decorative routing geometry and
+  // may sit far outside their endpoints; including them recreates the strip.
   // never zoomed back onto a hard 0.55 floor (v1.0.1 guarantee). The natural
   // fit is computed in-page from the visible bounding box with cy.fit's
   // padding semantics, so the assertion is composition-independent (the
@@ -1745,11 +1747,11 @@ async function main() {
   // fixed "< 0.55" threshold no longer applies).
   const natZoom = await cdp.eval(`(() => {
     const cy = window.__esw_cy
-    const els = cy.elements(':visible')
+    const els = cy.nodes(':visible')
     if (!els.length) return null
     const bb = els.boundingBox()
     if (bb.w <= 0 || bb.h <= 0) return null
-    return Math.min((cy.width() - 80) / bb.w, (cy.height() - 80) / bb.h)
+    return Math.min((cy.width() - 124) / bb.w, (cy.height() - 124) / bb.h)
   })()`)
   hh = await gvh()
   if (hh && natZoom && hh.visibleNodes >= 100) {
@@ -1990,6 +1992,181 @@ async function main() {
     typeof svcTruth === 'object' && svcTruth !== null && svcTruth.unconnected > 0 &&
       tm?.serviceBanked === svcTruth.unconnected,
     `degree0Services=${svcTruth?.unconnected} stopped=${svcTruth?.stopped} banked=${tm?.serviceBanked}`)
+
+  // ---- AH - VIEW GEOMETRY & RENDER PERFORMANCE (v1.0.3) ----------------
+  const perfSnap = () => cdp.eval(`window.__esw_perf?.snapshot?.() ?? null`)
+  const setGraphView = async (filter, mode = 'nodes') => {
+    await cdp.eval(`(() => {
+      const c = window.__esw_controller
+      if (!c) return false
+      const filterLabel = {
+        all: 'ALL', active: 'ACTIVE CONNECTIONS', listening: 'LISTENING', highcpu: 'HIGH CPU',
+      }['${filter}']
+      const modeLabel = '${mode}'.toUpperCase()
+      const buttons = [...document.querySelectorAll('button')]
+      const filterButton = buttons.find(b => b.textContent.trim() === filterLabel)
+      const modeButton = buttons.find(b => b.textContent.trim() === modeLabel)
+      if (filterButton && !filterButton.classList.contains('active')) filterButton.click()
+      if (modeButton && !modeButton.classList.contains('active')) modeButton.click()
+      c.setViewMode('${mode}')
+      c.setFilter('${filter}')
+      c.fit()
+      return true
+    })()`)
+    await sleep(900)
+  }
+
+  await setGraphView('listening', 'nodes')
+  let ah = await gvh()
+  check('AH1 filtered subset bbox is compact',
+    !!(ah && ah.visibleNodes > 0 && ah.visibleNodes < ah.totalNodes &&
+      ah.graphAspectRatio >= 0.75 && ah.graphAspectRatio <= 3),
+    `visible=${ah?.visibleNodes}/${ah?.totalNodes} aspect=${ah?.graphAspectRatio}`)
+
+  await setGraphView('listening', 'families')
+  ah = await gvh()
+  check('AH2 LISTENING+FAMILIES has meaningful viewport coverage',
+    !!(ah && ah.viewportCoverage >= 0.6 && ah.viewportNodes >= Math.min(20, ah.visibleNodes)),
+    `coverage=${ah?.viewportCoverage} viewport=${ah?.viewportNodes}/${ah?.visibleNodes}`)
+  await cdp.shot('v1.0.3-listening-families.png')
+  check('AH3 FIT ALL uses current visible elements only',
+    !!(ah && ah.visibleNodes < ah.totalNodes && ah.viewportNodes >= Math.floor(ah.visibleNodes * 0.75)),
+    `visible=${ah?.visibleNodes}/${ah?.totalNodes} viewport=${ah?.viewportNodes}`)
+  check('AH4 composed graph aspect ratio is sane',
+    !!(ah && ah.graphAspectRatio >= 0.75 && ah.graphAspectRatio <= 3 &&
+      ah.viewportAspectRatio >= 1.2 && ah.viewportAspectRatio <= 2.4),
+    `graph=${ah?.graphAspectRatio} viewport=${ah?.viewportAspectRatio}`)
+
+  await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    if (!cy) return false
+    cy.zoom({ level: 0.07, renderedPosition: { x: cy.width()/2, y: cy.height()/2 } })
+    return true
+  })()`)
+  await sleep(350)
+  let lodInfo = await cdp.eval(`(() => ({
+    mode: document.querySelector('.graph-card-layer')?.dataset.mode,
+    mounted: Number(document.querySelector('.graph-card-layer')?.dataset.mounted || 0),
+    socket: document.querySelector('.graph-socket-overlay')?.dataset.mode,
+    nodes: window.__esw_cy?.nodes(':visible').length || 0,
+  }))()`)
+  const farLodInfo = lodInfo
+  check('AH5 FAR LOD keeps a cheap mini-node representation',
+    lodInfo.mode === 'far' && lodInfo.socket === 'far-mini' && lodInfo.nodes > 0,
+    `mode=${lodInfo.mode} socket=${lodInfo.socket} nodes=${lodInfo.nodes}`)
+
+  await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    cy?.zoom({ level: 0.3, renderedPosition: { x: cy.width()/2, y: cy.height()/2 } })
+    return true
+  })()`)
+  await sleep(300)
+  const midMode = await cdp.eval(`document.querySelector('.graph-card-layer')?.dataset.mode`)
+  await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    cy?.zoom({ level: 0.72, renderedPosition: { x: cy.width()/2, y: cy.height()/2 } })
+    return true
+  })()`)
+  await sleep(450)
+  lodInfo = await cdp.eval(`(() => ({
+    mode: document.querySelector('.graph-card-layer')?.dataset.mode,
+    mounted: Number(document.querySelector('.graph-card-layer')?.dataset.mounted || 0),
+  }))()`)
+  check('AH6 MID/NEAR LOD restores readable cards',
+    midMode === 'mid' && lodInfo.mode === 'near' && lodInfo.mounted > 0,
+    `mid=${midMode} near=${lodInfo.mode} mounted=${lodInfo.mounted}`)
+  check('AH7 mounted DOM cards remain viewport-bounded',
+    lodInfo.mounted > 0 && lodInfo.mounted <= 180, `mounted=${lodInfo.mounted} cap=180`)
+
+  const overlayBudget = await cdp.eval(`(() => ({
+    wire: {
+      quality: document.querySelector('.graph-wire-underlay')?.dataset.quality,
+      processedEdges: document.querySelector('.graph-wire-underlay')?.dataset.processedEdges,
+      visibleEdges: document.querySelector('.graph-wire-underlay')?.dataset.visibleEdges,
+    },
+    socket: { mode: document.querySelector('.graph-socket-overlay')?.dataset.mode },
+  }))()`)
+  const ps1 = await perfSnap()
+  check('AH8 WireUnderlay uses an adaptive measured budget',
+    !!(ps1 && ps1.wireDrawMs.count > 0 && Number(overlayBudget?.wire?.processedEdges || 0) <=
+      Number(overlayBudget?.wire?.visibleEdges || 0)),
+    `quality=${overlayBudget?.wire?.quality} processed=${overlayBudget?.wire?.processedEdges}/${overlayBudget?.wire?.visibleEdges}`)
+  check('AH9 SocketOverlay disables sockets at FAR zoom',
+    farLodInfo.socket === 'far-mini' && farLodInfo.mounted === 0,
+    `farMode=${farLodInfo.socket} mounted=${farLodInfo.mounted}`)
+  const flowBudget = await cdp.eval(`window.__esw_controller?.overlayStats?.().budget ?? null`)
+  check('AH10 LIVE FLOW animation budget is bounded',
+    !!(flowBudget && flowBudget.maxParticles <= 140 && flowBudget.activityEdges <= 400 &&
+      flowBudget.maxAiParticles <= 24), JSON.stringify(flowBudget))
+
+  await cdp.eval(`(() => {
+    const c = window.__esw_controller
+    c?.testMute(true); c?.testForceIdle(); return true
+  })()`)
+  await sleep(650)
+  const idlePerf = await perfSnap()
+  check('AH11 overlays settle with no continuous idle rAF',
+    !!(idlePerf && idlePerf.idleRafActive === false), `idleRafActive=${idlePerf?.idleRafActive}`)
+  await cdp.eval(`window.__esw_controller?.testMute(false)`)
+
+  const ah12Identity = `ah12-${Date.now()}`
+  await cdp.eval(`(() => { window.__esw_cy?.scratch('_ah12_instance', '${ah12Identity}'); return true })()`)
+  await setGraphView('active', 'nodes')
+  const beforeFilterPerf = await perfSnap()
+  const beforeFilterHealth = await gvh()
+  await cdp.shot('v1.0.3-active-nodes.png')
+  await setGraphView('listening', 'nodes')
+  const afterFilterPerf = await perfSnap()
+  const afterFilterHealth = await gvh()
+  const sameGraphInstance = await cdp.eval(`window.__esw_cy?.scratch('_ah12_instance') === '${ah12Identity}'`)
+  check('AH12 filter changes avoid full graph reconstruction',
+    !!(beforeFilterHealth && afterFilterHealth && sameGraphInstance &&
+      afterFilterPerf.layoutMs.count - beforeFilterPerf.layoutMs.count <= 2),
+    `sameCy=${sameGraphInstance} liveNodes=${beforeFilterHealth?.totalNodes}->${afterFilterHealth?.totalNodes} layouts=${afterFilterPerf?.layoutMs?.count - beforeFilterPerf?.layoutMs?.count}`)
+
+  await setGraphView('listening', 'families')
+  const famHealth = await gvh()
+  await setGraphView('listening', 'nodes')
+  const nodeHealth = await gvh()
+  check('AH13 FAMILIES/NODES switching remains stable',
+    !!(famHealth && nodeHealth && famHealth.viewportNodes > 0 && nodeHealth.viewportNodes > 0 &&
+      famHealth.viewportCoverage >= 0.5 && nodeHealth.viewportCoverage >= 0.5),
+    `families=${famHealth?.visibleNodes}/${famHealth?.viewportCoverage} nodes=${nodeHealth?.visibleNodes}/${nodeHealth?.viewportCoverage}`)
+
+  const cacheBefore = (await gvh())?.layoutCacheHits || 0
+  await setGraphView('listening', 'nodes')
+  const cacheAfter = (await gvh())?.layoutCacheHits || 0
+  check('AH14 view-layout cache restores unchanged views', cacheAfter > cacheBefore,
+    `hits=${cacheBefore}->${cacheAfter}`)
+  const fakeTopology = await cdp.eval(`window.__esw_cy ? window.__esw_cy.nodes('[?benchmark], [?fixture], [?test_only]').length : -1`)
+  check('AH15 no fake topology added', fakeTopology === 0, `fakeNodes=${fakeTopology}`)
+  const activityTruth = await cdp.eval(`window.__esw_controller?.overlayStats?.().synthetic ?? -1`)
+  check('AH16 no fake activity in real mode', activityTruth === 0, `syntheticActivity=${activityTruth}`)
+
+  const ahViews = []
+  for (const view of ['ai', 'infra', 'system']) {
+    await cdp.eval(`window.__esw_controller?.setView('${view}')`)
+    await sleep(250)
+    ahViews.push((await gvh())?.visibleNodes > 0)
+  }
+  check('AH17 SYSTEM/AI/INFRA remain functional', ahViews.every(Boolean), `views=${ahViews.join(',')}`)
+
+  await setGraphView('listening', 'nodes')
+  await cdp.eval(`(() => { window.__esw_cy?.pan({x:-30000,y:24000}); return true })()`)
+  await sleep(150)
+  await cdp.eval(`(() => { window.__esw_controller?.fit(); return true })()`)
+  await sleep(700)
+  const fitRecovery = await gvh()
+  check('AH18 FIT ALL recovers after arbitrary pan',
+    !!(fitRecovery && fitRecovery.viewportCoverage >= 0.6 && fitRecovery.viewportNodes > 0),
+    `coverage=${fitRecovery?.viewportCoverage} viewport=${fitRecovery?.viewportNodes}`)
+
+  await cdp.eval(`(() => {
+    const c = window.__esw_controller
+    c?.setView('system'); c?.setViewMode('nodes'); c?.setFilter('all'); c?.fit(); return true
+  })()`)
+  await sleep(800)
+  await cdp.shot('v1.0.3-all-nodes-fit.png')
 
   // ---- final screenshot (live data, production build) --------------------
   // capture at a realistic desktop resolution for the README artifact

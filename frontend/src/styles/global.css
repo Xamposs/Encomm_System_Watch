@@ -1132,8 +1132,13 @@ body,
   pointer-events: none;
 }
 
-.graph-card-layer[data-mode='compact'] {
+.graph-card-layer[data-mode='mid'],
+.graph-card-layer[data-mode='far'] {
   display: none;
+}
+
+.graph-card-layer[data-interacting='true'] .graph-card {
+  will-change: transform;
 }
 
 .graph-card {
