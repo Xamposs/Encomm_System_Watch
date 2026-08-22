@@ -65,6 +65,7 @@ export class SocketOverlay {
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
     container.addEventListener('esw:layout', this.requestDraw)
+    container.addEventListener('esw:lod', this.requestDraw)
     container.addEventListener('esw:interaction', this.onInteraction)
     this.resize()
     cy.on('pan zoom resize', this.requestDraw)
@@ -183,20 +184,21 @@ export class SocketOverlay {
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.cssW, this.cssH)
     const zoom = cy.zoom()
-    if (zoom < 0.5) {
+    const cardLod = this.container.querySelector<HTMLElement>('.graph-card-layer')?.dataset.mode
+    if (zoom < 0.5 || cardLod === 'mid' || cardLod === 'far') {
       // MID/FAR LOD: fixed-screen canvas mini-cards. Cytoscape model units
       // shrink with zoom, so relying on native borders alone turns nodes into
       // hairlines. This pass preserves a clear rectangular representation
       // without mounting any HTML DOM cards.
-      const far = zoom < 0.09
+      const far = cardLod === 'far' || zoom < 0.09
       this.canvas.dataset.mode = far ? 'far-mini' : 'mid-mini'
       // Fixed-screen tiers follow the available screen-space pitch. At the
       // usual FIT ALL zoom (~0.2), 48x17 cards leave a small gap while still
       // carrying a readable process/service name.
-      const width = far ? 18 : zoom < 0.18 ? 42 : zoom < 0.28 ? 48 : zoom < 0.39 ? 62 : 78
-      const height = far ? 9 : zoom < 0.18 ? 15 : zoom < 0.28 ? 17 : zoom < 0.39 ? 20 : 23
-      const fontSize = far ? 5.5 : zoom < 0.18 ? 6 : zoom < 0.28 ? 7 : zoom < 0.39 ? 8 : 9
-      const maxChars = far ? 2 : zoom < 0.18 ? 7 : zoom < 0.28 ? 9 : zoom < 0.39 ? 11 : 14
+      const width = far ? 18 : zoom < 0.18 ? 42 : zoom < 0.28 ? 48 : zoom < 0.39 ? 62 : zoom < 0.55 ? 78 : 92
+      const height = far ? 9 : zoom < 0.18 ? 15 : zoom < 0.28 ? 17 : zoom < 0.39 ? 20 : zoom < 0.55 ? 23 : 27
+      const fontSize = far ? 5.5 : zoom < 0.18 ? 6 : zoom < 0.28 ? 7 : zoom < 0.39 ? 8 : zoom < 0.55 ? 9 : 10
+      const maxChars = far ? 2 : zoom < 0.18 ? 7 : zoom < 0.28 ? 9 : zoom < 0.39 ? 11 : zoom < 0.55 ? 14 : 16
       const nodes = cy.nodes(':visible')
       const stride = Math.max(1, Math.ceil(nodes.length / 1400))
       ctx.lineWidth = far ? 0.8 : 1
@@ -290,6 +292,7 @@ export class SocketOverlay {
     this.cy.off('position', 'node', this.requestDraw)
     this.cy.off('add remove', 'edge', this.onTopologyChange)
     this.canvas.parentElement?.removeEventListener('esw:layout', this.requestDraw)
+    this.container.removeEventListener('esw:lod', this.requestDraw)
     this.container.removeEventListener('esw:interaction', this.onInteraction)
     this.canvas.remove()
   }

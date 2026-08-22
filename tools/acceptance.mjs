@@ -2085,6 +2085,43 @@ async function main() {
   check('AH7 mounted DOM cards remain viewport-bounded',
     lodInfo.mounted > 0 && lodInfo.mounted <= 180, `mounted=${lodInfo.mounted} cap=180`)
 
+  await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    if (!cy) return false
+    const nodes = cy.nodes(':visible').slice(0, Math.min(220, cy.nodes(':visible').length))
+    cy.scratch('_ah_density_positions', nodes.map((node) => ({ id: node.id(), p: { ...node.position() } })))
+    const center = { x: cy.width() / 2, y: cy.height() / 2 }
+    cy.batch(() => nodes.positions(() => ({
+      x: (center.x - cy.pan().x) / cy.zoom(),
+      y: (center.y - cy.pan().y) / cy.zoom(),
+    })))
+    cy.zoom({ level: 0.65, renderedPosition: center })
+    return true
+  })()`)
+  await sleep(350)
+  const densityLod = await cdp.eval(`(() => ({
+    card: document.querySelector('.graph-card-layer')?.dataset.mode,
+    fallback: document.querySelector('.graph-card-layer')?.dataset.densityFallback,
+    candidates: Number(document.querySelector('.graph-card-layer')?.dataset.candidates || 0),
+    mounted: Number(document.querySelector('.graph-card-layer')?.dataset.mounted || 0),
+    socket: document.querySelector('.graph-socket-overlay')?.dataset.mode,
+    labels: Number(document.querySelector('.graph-socket-overlay')?.dataset.labeledNodes || 0),
+  }))()`)
+  check('AH7b dense NEAR viewport falls back to complete labeled canvas cards',
+    densityLod.card === 'mid' && densityLod.fallback === 'true' &&
+      densityLod.candidates > 180 && densityLod.mounted === 0 &&
+      densityLod.socket === 'mid-mini' && densityLod.labels > 0,
+    JSON.stringify(densityLod))
+  await cdp.eval(`(() => {
+    const cy = window.__esw_cy
+    const saved = cy?.scratch('_ah_density_positions') || []
+    cy?.batch(() => saved.forEach(({ id, p }) => cy.getElementById(id).position(p)))
+    cy?.removeScratch('_ah_density_positions')
+    cy?.zoom({ level: 0.72, renderedPosition: { x: cy.width()/2, y: cy.height()/2 } })
+    return true
+  })()`)
+  await sleep(350)
+
   const overlayBudget = await cdp.eval(`(() => ({
     wire: {
       quality: document.querySelector('.graph-wire-underlay')?.dataset.quality,

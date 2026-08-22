@@ -508,10 +508,9 @@ const ZOOM_CLOSE = 0.5
 
 // incremental-layout policy (v0.3.1): on large graphs, small node additions
 // must NOT trigger an expensive fcose pass over the whole graph. Above
-// LARGE_GRAPH_NODES, an incremental layout only runs when the pending batch
-// reaches LARGE_GRAPH_MIN_BATCH (or 5% of the graph, whichever is larger).
+// LARGE_GRAPH_NODES, steady additions accumulate until the maintenance gate
+// in scheduleIncrementalLayout() is reached.
 const LARGE_GRAPH_NODES = 600
-const LARGE_GRAPH_MIN_BATCH = 40
 const VIEW_GAP_X = 280
 const VIEW_GAP_Y = 230
 const CARD_PITCH_X = 232
@@ -807,8 +806,6 @@ export class GraphController {
             position: { x: 0, y: 0 },
           })
           el = this.cy.getElementById(id)
-          this.pendingNewNodes += 1
-          this.scheduleIncrementalLayout()
         }
         const data = el.data()
         data.name = g.name ?? data.name
@@ -994,8 +991,6 @@ export class GraphController {
 
     if (defs.length > 0) {
       this.cy.add(defs)
-      this.pendingNewNodes += defs.filter((d) => d.group === 'nodes').length
-      this.scheduleIncrementalLayout()
     }
     if (signals.length > 0) this.overlay.applyAiSignals(signals)
     if (this.aiRuntimeNodes.size > 0) this.ensureActivityDecayTimer()
@@ -1036,6 +1031,82 @@ export class GraphController {
       x: 200 + (Math.random() - 0.5) * jitter,
       y: 100 + (Math.random() - 0.5) * jitter,
     }
+  }
+
+  /**
+   * Deterministic vacant-slot placement for nodes arriving between full rack
+   * compositions. It keeps live process/socket churn readable immediately,
+   * while the cumulative maintenance pass below eventually reclassifies the
+   * node into its final semantic zone.
+   */
+  private incrementalRackPosition(nodeId: string, anchorId?: string): { x: number; y: number } {
+    const nodes = this.cy.nodes()
+    if (!nodes.length) return { x: 200, y: 100 }
+    const occupied: Array<{ x: number; y: number }> = []
+    nodes.forEach((node) => {
+      const p = node.position()
+      if (Number.isFinite(p.x) && Number.isFinite(p.y)) occupied.push({ x: p.x, y: p.y })
+    })
+    const anchor = anchorId ? this.cy.getElementById(anchorId) : null
+    const bb = nodes.boundingBox()
+    const base = anchor?.length
+      ? anchor.position()
+      : {
+          x: bb.x1 + Math.max(CARD_PITCH_X, bb.w * 0.15),
+          y: bb.y1 + Math.max(CARD_PITCH_Y, bb.h * 0.10),
+        }
+    let hash = 2166136261
+    for (let i = 0; i < nodeId.length; i++) {
+      hash ^= nodeId.charCodeAt(i)
+      hash = Math.imul(hash, 16777619)
+    }
+    hash >>>= 0
+    const vacant = (candidate: { x: number; y: number }): boolean =>
+      occupied.every((p) =>
+        Math.abs(p.x - candidate.x) >= CARD_PITCH_X * 0.72 ||
+        Math.abs(p.y - candidate.y) >= CARD_PITCH_Y * 0.72,
+      )
+    for (let radius = 0; radius <= 14; radius++) {
+      const ring: Array<{ dx: number; dy: number }> = []
+      if (radius === 0) ring.push({ dx: 0, dy: 0 })
+      else {
+        for (let dx = -radius; dx <= radius; dx++) {
+          for (let dy = -radius; dy <= radius; dy++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) === radius) ring.push({ dx, dy })
+          }
+        }
+      }
+      const start = ring.length ? hash % ring.length : 0
+      for (let i = 0; i < ring.length; i++) {
+        const offset = ring[(start + i) % ring.length]
+        const candidate = {
+          x: base.x + offset.dx * CARD_PITCH_X,
+          y: base.y + offset.dy * CARD_PITCH_Y,
+        }
+        if (vacant(candidate)) return candidate
+      }
+    }
+    const columns = Math.max(12, this.rackColumns || Math.ceil(Math.sqrt(nodes.length)))
+    return {
+      x: bb.x1 + (hash % columns) * CARD_PITCH_X,
+      y: bb.y2 + CARD_PITCH_Y,
+    }
+  }
+
+  /** Cheap overlap alarm used only after node-add batches. */
+  private hasLayoutPileup(): boolean {
+    const buckets = new Map<string, number>()
+    const bucketX = CARD_PITCH_X * 0.45
+    const bucketY = CARD_PITCH_Y * 0.45
+    for (const node of this.cy.nodes(':visible')) {
+      if (node.hasClass('fading')) continue
+      const p = node.position()
+      const key = `${Math.round(p.x / bucketX)}:${Math.round(p.y / bucketY)}`
+      const count = (buckets.get(key) ?? 0) + 1
+      if (count >= 7) return true
+      buckets.set(key, count)
+    }
+    return false
   }
 
   /** Read-only AI telemetry diagnostics for acceptance / debugging. */
@@ -1412,19 +1483,10 @@ export class GraphController {
     const data = this.flattenNode(node)
     this.invalidateTopology()
     if (born) data.born = true
-    // place new nodes near a real neighbor when known (topology coherence),
-    // otherwise near the current view center so they join the visible graph
-    let position: { x: number; y: number }
-    const anchor = anchorId ? this.cy.getElementById(anchorId) : undefined
-    if (anchor && anchor.length) {
-      const ap = anchor.position()
-      position = {
-        x: ap.x + (Math.random() - 0.5) * 180,
-        y: ap.y + (Math.random() - 0.5) * 180,
-      }
-    } else {
-      position = this.graphInteriorPosition(160)
-    }
+    // Place live additions in the closest vacant rack slot. The previous
+    // random ±180 placement accumulated steady small batches around the same
+    // anchor/interior point, eventually producing the hours-later pile-up.
+    const position = this.incrementalRackPosition(node.id, anchorId)
     this.cy.add({ group: 'nodes', data, position })
     if (born) {
       window.setTimeout(() => {
@@ -2394,16 +2456,19 @@ export class GraphController {
     // incremental: small additions on any graph keep positions; on a large
     // graph a real batch (>= threshold) may re-run the deterministic
     // composition so the rack map stays coherent after meaningful churn
-    const n = this.cy.nodes().length
-    const large = n > LARGE_GRAPH_NODES
-    if (!large || batch >= Math.max(LARGE_GRAPH_MIN_BATCH, Math.round(n * 0.05))) {
+    if (batch > 0) {
       const t0 = performance.now()
       this.layoutState = 'active'
       try {
         if (this.viewLayoutKey() === 'all:nodes') this.composeRackLayout()
         else this.composeCurrentView(true)
-      } catch {
-        this.cy.layout({ name: 'cose', animate: false } as never).run()
+        delete this.cy.container()?.dataset.maintenanceError
+      } catch (e) {
+        // Never replace a healthy long-running rack with a global COSE layout
+        // because one transient snapshot/edge race failed maintenance.
+        console.error('[v1.0.3] incremental rack maintenance failed', e)
+        const container = this.cy.container()
+        if (container) container.dataset.maintenanceError = String(e)
       }
       this.layoutState = 'idle'
       perf.recordLayout(performance.now() - t0)
@@ -2421,20 +2486,23 @@ export class GraphController {
         const total = this.cy.nodes().length
         const large = total > LARGE_GRAPH_NODES
         const batch = this.pendingNewNodes
-        this.pendingNewNodes = 0
         const positioned = this.cy.nodes().some((element) => {
           const p = (element as NodeSingular).position()
           return Math.abs(p.x) > 1 || Math.abs(p.y) > 1
         })
         if (!positioned) {
+          this.pendingNewNodes = 0
           this.runLayout('initial')
           return
         }
-        if (large && batch < Math.max(LARGE_GRAPH_MIN_BATCH, Math.round(total * 0.05))) {
-          // small additions on a large graph keep their anchor/center
-          // positions — no full re-layout (preserves stability)
+        const maintenanceThreshold = Math.max(24, Math.round(total * 0.03))
+        if (large && batch < maintenanceThreshold && !this.hasLayoutPileup()) {
+          // Keep accumulating steady small batches. The old code reset the
+          // counter here, so a busy machine adding 1–3 nodes per tick could
+          // run forever without ever receiving rack maintenance.
           return
         }
+        this.pendingNewNodes = 0
         this.runLayout('incremental', batch)
       }
     }, 450)
@@ -2442,6 +2510,7 @@ export class GraphController {
 
   /** Manual RELAYOUT: re-run the initial layout (fit + randomize). */
   relayout(): void {
+    this.pendingNewNodes = 0
     this.composeCurrentView(true)
     this.scheduleCamera('current')
   }

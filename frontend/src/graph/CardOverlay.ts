@@ -316,6 +316,7 @@ export class CardOverlay {
     })
     this.cy.style().update()
     if (modeChanged && mode !== 'near') this.clearCards()
+    this.container.dispatchEvent(new CustomEvent('esw:lod', { detail: { mode } }))
   }
 
   private updateState(record: CardRecord, node: NodeSingular): void {
@@ -353,12 +354,41 @@ export class CardOverlay {
   private draw(): void {
     const started = performance.now()
     const zoom = this.cy.zoom()
-    const mode: LodMode = zoom >= CardOverlay.NEAR_ZOOM
+    const margin = 110
+    const w = this.container.clientWidth
+    const h = this.container.clientHeight
+    let nearCandidates: Array<{ node: NodeSingular; x: number; y: number; distance: number }> | null = null
+    // Zoom alone is not enough to choose the HTML-card LOD. After long live
+    // sessions a dense viewport can contain more nodes than the DOM-card cap;
+    // switching to NEAR in that state leaves the uncapped remainder looking
+    // like bare sockets. Count on-stage nodes first and retain the complete
+    // canvas-card representation until every visible candidate can mount.
+    if (zoom >= CardOverlay.NEAR_ZOOM) {
+      const center = { x: w / 2, y: h / 2 }
+      nearCandidates = []
+      this.cy.nodes(':visible').forEach((node) => {
+        if (!node.visible()) return
+        const p = node.renderedPosition()
+        const onstage = p.x > -margin && p.x < w + margin && p.y > -margin && p.y < h + margin
+        if (!onstage) return
+        nearCandidates!.push({
+          node,
+          x: p.x,
+          y: p.y,
+          distance: Math.hypot(p.x - center.x, p.y - center.y),
+        })
+      })
+    }
+    const densityFallback = zoom >= CardOverlay.NEAR_ZOOM &&
+      (nearCandidates?.length ?? 0) > CardOverlay.MAX_NEAR_CARDS
+    const mode: LodMode = zoom >= CardOverlay.NEAR_ZOOM && !densityFallback
       ? 'near'
       : zoom >= CardOverlay.MID_ZOOM ? 'mid' : 'far'
     this.setLodMode(mode)
+    this.root.dataset.densityFallback = densityFallback ? 'true' : 'false'
     this.root.dataset.visibleNodes = String(this.cy.nodes(':visible').length)
     this.root.dataset.zoom = zoom.toFixed(4)
+    this.root.dataset.candidates = String(nearCandidates?.length ?? 0)
     const sample = this.cy.nodes(':visible').first()
     if (sample.length) {
       this.root.dataset.sampleClasses = sample.classes().join(' ')
@@ -371,19 +401,8 @@ export class CardOverlay {
       perf.recordOverlayDraw('card', performance.now() - started)
       return
     }
-    const margin = 110
-    const w = this.container.clientWidth
-    const h = this.container.clientHeight
     const wanted = new Set<string>()
-    const center = { x: w / 2, y: h / 2 }
-    const candidates: Array<{ node: NodeSingular; x: number; y: number; distance: number }> = []
-    this.cy.nodes(':visible').forEach((node) => {
-      if (!node.visible()) return
-      const p = node.renderedPosition()
-      const onstage = p.x > -margin && p.x < w + margin && p.y > -margin && p.y < h + margin
-      if (!onstage) return
-      candidates.push({ node, x: p.x, y: p.y, distance: Math.hypot(p.x - center.x, p.y - center.y) })
-    })
+    const candidates = nearCandidates ?? []
     candidates.sort((a, b) => a.distance - b.distance || a.node.id().localeCompare(b.node.id()))
     for (const candidate of candidates.slice(0, CardOverlay.MAX_NEAR_CARDS)) {
       const { node, x, y } = candidate
@@ -405,7 +424,6 @@ export class CardOverlay {
     if (!this.interacting) this.pruneCards(wanted)
     this.root.dataset.mounted = String(this.cards.size)
     this.root.dataset.cap = String(CardOverlay.MAX_NEAR_CARDS)
-    this.root.dataset.candidates = String(candidates.length)
     perf.recordCardCounts(this.creates, this.updates, this.removals)
     const elapsed = performance.now() - started
     perf.recordOverlayDraw('card', elapsed)

@@ -34,6 +34,10 @@ relationships, or signals were added.
   quality once after a 160 ms settle window.
 
 ### Fixed
+- Long-running live sessions no longer degrade into bare sockets, horizontal
+  wires, and an overlapping localhost pile: NEAR LOD now falls back to fully
+  labeled canvas cards when viewport density exceeds the DOM cap, new nodes
+  take vacant rack slots, and small batches accumulate toward maintenance.
 - MID/FIT canvas cells now render cached compact process/service titles instead
   of empty outlines; title size expands with zoom while keeping the DOM-card
   count at zero for large views.
