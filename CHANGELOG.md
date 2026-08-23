@@ -26,9 +26,10 @@ relationships, or signals were added.
   layouts and the line-only FIT ALL failure.
 - FIT ALL frames current visible nodes after two stable animation frames and
   excludes hidden inventory and outlying curved-edge control points.
-- Wire glow uses zoom/interaction-dependent sampling; sockets pause during
-  interaction and become cheap canvas mini-cards at MID/FAR; LIVE FLOW keeps
-  bounded zoom-aware particle budgets prioritizing visible real activity.
+- Wire glow uses zoom/interaction-dependent sampling; sockets use a frozen
+  compositor frame during interaction and become cheap canvas mini-cards at
+  MID/FAR; LIVE FLOW keeps bounded zoom-aware particle budgets prioritizing
+  visible real activity.
 - Metric-only family updates no longer rebuild the family projection or move
   the camera. Pan/zoom/drag use a cheap transform-only path and restore normal
   quality once after a 160 ms settle window.
@@ -36,8 +37,9 @@ relationships, or signals were added.
 ### Fixed
 - Zoom-out and pan no longer repaint duplicate wire glow, mini-card labels,
   HTML cards, and live-flow particles on every gesture frame. Overview edges
-  use a truthful straight-line LOD, expensive decorative layers pause during
-  camera movement, and restore once after the 160 ms settle window.
+  use a truthful straight-line LOD; the last complete visual frame stays
+  visible and follows the camera through one GPU transform, then every layer
+  redraws once after the 160 ms settle window.
 - Long-running live sessions no longer degrade into bare sockets, horizontal
   wires, and an overlapping localhost pile: NEAR LOD now falls back to fully
   labeled canvas cards when viewport density exceeds the DOM cap, new nodes

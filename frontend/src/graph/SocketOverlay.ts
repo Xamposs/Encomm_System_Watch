@@ -1,6 +1,7 @@
 import type { Core, NodeSingular } from 'cytoscape'
 import { DEFAULT_EDGE_COLOR, EDGE_KIND_COLORS } from './WireUnderlay'
 import { perf } from './PerfMonitor'
+import { captureViewport, proxyViewport, resetViewportProxy, type ViewportSnapshot } from './ViewportProxy'
 
 /** Tie-break order for a node's dominant edge kind (socket color). */
 const SOCKET_PRIORITY = [
@@ -49,6 +50,8 @@ export class SocketOverlay {
   private titleCache = new Map<string, string>()
   private cacheDirty = true
   private interacting = false
+  private renderedViewport: ViewportSnapshot
+  private interactionViewport: ViewportSnapshot | null = null
 
   constructor(
     private cy: Core,
@@ -62,6 +65,7 @@ export class SocketOverlay {
     const ctx = this.canvas.getContext('2d')
     if (!ctx) throw new Error('canvas 2d unavailable')
     this.ctx = ctx
+    this.renderedViewport = captureViewport(cy)
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
     container.addEventListener('esw:layout', this.requestDraw)
@@ -117,9 +121,10 @@ export class SocketOverlay {
       if (this.raf) cancelAnimationFrame(this.raf)
       this.raf = 0
       perf.setOverlayRaf('sockets', false)
-      this.ctx.clearRect(0, 0, this.cssW, this.cssH)
-      this.canvas.dataset.mode = 'interaction-paused'
-      this.canvas.dataset.labeledNodes = '0'
+      this.interactionViewport = this.renderedViewport
+      this.canvas.style.willChange = 'transform'
+      proxyViewport(this.canvas, this.cy, this.interactionViewport)
+      this.canvas.dataset.mode = 'interaction-frozen'
       return
     }
     this.requestDraw()
@@ -141,11 +146,17 @@ export class SocketOverlay {
   }
 
   private requestDraw = (): void => {
-    if (this.destroyed || this.interacting) return
+    if (this.destroyed) return
+    if (this.interacting) {
+      if (this.interactionViewport) proxyViewport(this.canvas, this.cy, this.interactionViewport)
+      return
+    }
     if (this.raf) return
     perf.setOverlayRaf('sockets', true)
     this.raf = requestAnimationFrame(() => {
       this.raf = 0
+      resetViewportProxy(this.canvas)
+      this.interactionViewport = null
       try { this.draw() } finally { perf.setOverlayRaf('sockets', false) }
     })
   }
@@ -193,13 +204,12 @@ export class SocketOverlay {
     const started = performance.now()
     const cy = this.cy
     const ctx = this.ctx
-    ctx.clearRect(0, 0, this.cssW, this.cssH)
     if (this.interacting) {
-      this.canvas.dataset.mode = 'interaction-paused'
-      this.canvas.dataset.labeledNodes = '0'
-      perf.recordOverlayDraw('socket', performance.now() - started)
+      if (this.interactionViewport) proxyViewport(this.canvas, cy, this.interactionViewport)
       return
     }
+    ctx.clearRect(0, 0, this.cssW, this.cssH)
+    this.renderedViewport = captureViewport(cy)
     const zoom = cy.zoom()
     const cardLod = this.container.querySelector<HTMLElement>('.graph-card-layer')?.dataset.mode
     if (zoom < 0.5 || cardLod === 'mid' || cardLod === 'far') {

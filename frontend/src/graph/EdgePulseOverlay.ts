@@ -1,6 +1,7 @@
 import type { Core, EdgeSingular } from 'cytoscape'
 import type { NetworkActivityItem } from '../types/system'
 import { perf } from './PerfMonitor'
+import { captureViewport, proxyViewport, resetViewportProxy, type ViewportSnapshot } from './ViewportProxy'
 
 export type PulseKind = 'open' | 'close' | 'update'
 
@@ -126,6 +127,8 @@ export class EdgePulseOverlay {
   private testMuted = false
   private enabled = true
   private interacting = false
+  private renderedViewport: ViewportSnapshot
+  private interactionViewport: ViewportSnapshot | null = null
   private signalTimers = new Map<string, number>()
   private ro: ResizeObserver
 
@@ -141,11 +144,19 @@ export class EdgePulseOverlay {
     const ctx = this.canvas.getContext('2d')
     if (!ctx) throw new Error('canvas 2d unavailable')
     this.ctx = ctx
+    this.renderedViewport = captureViewport(cy)
     this.canvas.dataset.mode = 'live'
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
     container.addEventListener('esw:interaction', this.onInteraction)
+    cy.on('pan zoom', this.onViewportChange)
     this.resize()
+  }
+
+  private onViewportChange = (): void => {
+    if (this.interacting && this.interactionViewport) {
+      proxyViewport(this.canvas, this.cy, this.interactionViewport)
+    }
   }
 
   private hasVisualWork(): boolean {
@@ -157,16 +168,21 @@ export class EdgePulseOverlay {
     const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
     if (active === this.interacting) return
     this.interacting = active
-    this.canvas.dataset.mode = active ? 'interaction-paused' : 'live'
+    this.canvas.dataset.mode = active ? 'interaction-frozen' : 'live'
     if (active) {
       cancelAnimationFrame(this.raf)
       this.raf = 0
       this.running = false
       perf.setOverlayRaf('signals', false)
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+      this.interactionViewport = this.renderedViewport
+      this.canvas.style.willChange = 'transform'
+      proxyViewport(this.canvas, this.cy, this.interactionViewport)
       return
     }
+    resetViewportProxy(this.canvas)
+    this.interactionViewport = null
     if (this.hasVisualWork()) this.ensureRunning()
+    else this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
   }
 
   private resize(): void {
@@ -529,6 +545,7 @@ export class EdgePulseOverlay {
 
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+    this.renderedViewport = captureViewport(this.cy)
     const zoom = Math.max(0.4, this.cy.zoom())
 
     // --- faint traveling dots on recently-active edges (RECENT decay) ---
@@ -707,6 +724,7 @@ export class EdgePulseOverlay {
 
   destroy(): void {
     this.container.removeEventListener('esw:interaction', this.onInteraction)
+    this.cy.off('pan zoom', this.onViewportChange)
     if (this.enabled) this.setEnabled(false)
     else cancelAnimationFrame(this.raf)
     perf.setOverlayRaf('signals', false)

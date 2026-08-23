@@ -1137,8 +1137,10 @@ body,
   display: none;
 }
 
-.graph-card-layer[data-interacting='true'] {
-  visibility: hidden;
+.graph-card-stage {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
 }
 
 .graph-card {

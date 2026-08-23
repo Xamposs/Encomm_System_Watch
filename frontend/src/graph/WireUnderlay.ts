@@ -1,5 +1,6 @@
 import type { Core } from 'cytoscape'
 import { perf } from './PerfMonitor'
+import { captureViewport, proxyViewport, resetViewportProxy, type ViewportSnapshot } from './ViewportProxy'
 
 /**
  * Reference-fidelity wiring palette. Edge kind remains the source of truth;
@@ -77,6 +78,8 @@ export class WireUnderlay {
   private lastDraw = 0
   private drawTimer: number | undefined
   private interacting = false
+  private renderedViewport: ViewportSnapshot
+  private interactionViewport: ViewportSnapshot | null = null
 
   constructor(
     private cy: Core,
@@ -92,6 +95,7 @@ export class WireUnderlay {
     const ctx = this.canvas.getContext('2d')
     if (!ctx) throw new Error('canvas 2d unavailable')
     this.ctx = ctx
+    this.renderedViewport = captureViewport(cy)
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
     container.addEventListener('esw:layout', this.requestDraw)
@@ -118,9 +122,10 @@ export class WireUnderlay {
       this.raf = 0
       this.drawTimer = undefined
       perf.setOverlayRaf('wires', false)
-      this.ctx.clearRect(0, 0, this.cssW, this.cssH)
-      this.canvas.dataset.quality = 'interaction-hidden'
-      this.canvas.dataset.processedEdges = '0'
+      this.interactionViewport = this.renderedViewport
+      this.canvas.style.willChange = 'transform'
+      proxyViewport(this.canvas, this.cy, this.interactionViewport)
+      this.canvas.dataset.quality = 'interaction-frozen'
       return
     }
     this.requestDraw()
@@ -142,7 +147,12 @@ export class WireUnderlay {
   }
 
   private requestDraw = (): void => {
-    if (this.destroyed || this.interacting || this.raf || this.drawTimer !== undefined) return
+    if (this.destroyed) return
+    if (this.interacting) {
+      if (this.interactionViewport) proxyViewport(this.canvas, this.cy, this.interactionViewport)
+      return
+    }
+    if (this.raf || this.drawTimer !== undefined) return
     // Decorative wire glow is intentionally capped at 20 fps. Geometry and
     // hit-testing remain native Cytoscape; this pass never needs 60 redraws/s.
     const frameInterval = 50
@@ -153,6 +163,8 @@ export class WireUnderlay {
       this.raf = requestAnimationFrame(() => {
         this.raf = 0
         this.lastDraw = performance.now()
+        resetViewportProxy(this.canvas)
+        this.interactionViewport = null
         try { this.draw() } finally { perf.setOverlayRaf('wires', false) }
       })
     }
@@ -180,13 +192,12 @@ export class WireUnderlay {
     const started = performance.now()
     const cy = this.cy
     const ctx = this.ctx
-    ctx.clearRect(0, 0, this.cssW, this.cssH)
     if (this.interacting) {
-      this.canvas.dataset.quality = 'interaction-hidden'
-      this.canvas.dataset.processedEdges = '0'
-      perf.recordOverlayDraw('wire', performance.now() - started)
+      if (this.interactionViewport) proxyViewport(this.canvas, cy, this.interactionViewport)
       return
     }
+    ctx.clearRect(0, 0, this.cssW, this.cssH)
+    this.renderedViewport = captureViewport(cy)
     if (cy.nodes().length === 0) {
       perf.recordOverlayDraw('wire', performance.now() - started)
       return

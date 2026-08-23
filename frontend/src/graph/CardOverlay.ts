@@ -1,5 +1,6 @@
 import type { Core, EventObjectNode, NodeSingular } from 'cytoscape'
 import { perf } from './PerfMonitor'
+import { captureViewport, proxyViewport, resetViewportProxy, type ViewportSnapshot } from './ViewportProxy'
 
 type Tone = 'cyan' | 'blue' | 'green' | 'amber' | 'magenta' | 'violet' | 'red'
 type LodMode = 'near' | 'mid' | 'far'
@@ -153,6 +154,7 @@ function metricFor(node: NodeSingular): string {
  */
 export class CardOverlay {
   private root: HTMLDivElement
+  private stage: HTMLDivElement
   private cards = new Map<string, CardRecord>()
   private raf = 0
   private destroyed = false
@@ -161,6 +163,8 @@ export class CardOverlay {
   private creates = 0
   private updates = 0
   private removals = 0
+  private renderedViewport: ViewportSnapshot
+  private interactionViewport: ViewportSnapshot | null = null
 
   private static readonly NEAR_ZOOM = 0.5
   private static readonly MID_ZOOM = 0.09
@@ -172,6 +176,10 @@ export class CardOverlay {
   ) {
     this.root = document.createElement('div')
     this.root.className = 'graph-card-layer'
+    this.stage = document.createElement('div')
+    this.stage.className = 'graph-card-stage'
+    this.root.appendChild(this.stage)
+    this.renderedViewport = captureViewport(cy)
     this.container.appendChild(this.root)
     this.container.addEventListener('esw:layout', this.requestDraw)
     this.container.addEventListener('esw:cards-refresh', this.requestDraw)
@@ -235,7 +243,7 @@ export class CardOverlay {
       this.makePart('graph-card-state'),
     )
     this.cards.set(node.id(), record)
-    this.root.appendChild(root)
+    this.stage.appendChild(root)
     this.creates += 1
     this.updateContent(record, node)
     return record
@@ -305,6 +313,9 @@ export class CardOverlay {
       if (this.raf) cancelAnimationFrame(this.raf)
       this.raf = 0
       perf.setOverlayRaf('cards', false)
+      this.interactionViewport = this.renderedViewport
+      this.stage.style.willChange = 'transform'
+      proxyViewport(this.stage, this.cy, this.interactionViewport)
       return
     }
     this.requestDraw()
@@ -351,10 +362,17 @@ export class CardOverlay {
   }
 
   private requestDraw = (): void => {
-    if (this.destroyed || this.interacting || this.raf) return
+    if (this.destroyed) return
+    if (this.interacting) {
+      if (this.interactionViewport) proxyViewport(this.stage, this.cy, this.interactionViewport)
+      return
+    }
+    if (this.raf) return
     perf.setOverlayRaf('cards', true)
     this.raf = requestAnimationFrame(() => {
       this.raf = 0
+      resetViewportProxy(this.stage)
+      this.interactionViewport = null
       try { this.draw() } finally { perf.setOverlayRaf('cards', false) }
     })
   }
@@ -362,6 +380,7 @@ export class CardOverlay {
   private draw(): void {
     const started = performance.now()
     const zoom = this.cy.zoom()
+    this.renderedViewport = captureViewport(this.cy)
     const margin = 110
     const w = this.container.clientWidth
     const h = this.container.clientHeight

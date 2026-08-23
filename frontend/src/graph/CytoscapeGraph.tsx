@@ -50,10 +50,9 @@ export function CytoscapeGraph({ controllerRef, filter, search, onSelect, onSele
       minZoom: 0.04,
       maxZoom: 4,
       wheelSensitivity: 0.25,
-      // Dense graphs can contain hundreds of long bezier edges. Let the
-      // texture-backed node layer move by itself while the camera is moving;
-      // Cytoscape restores the edges as soon as the gesture settles.
-      hideEdgesOnViewport: true,
+      // The renderer's viewport texture moves the complete graph as one
+      // visible frame. Never blank the native edge layer during a gesture.
+      hideEdgesOnViewport: false,
       textureOnViewport: true,
       motionBlur: false,
       // box selection stays OFF so left-drag on the background keeps

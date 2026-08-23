@@ -2060,7 +2060,7 @@ async function main() {
     `mode=${lodInfo.mode} socket=${lodInfo.socket} nodes=${lodInfo.nodes}`)
   check('AH5b overview removes duplicate glow and simplifies every real edge',
     lodInfo.edges > 0 && lodInfo.overviewEdges === lodInfo.edges &&
-      ['overview-native', 'interaction-hidden'].includes(lodInfo.wireQuality) &&
+      ['overview-native', 'interaction-frozen'].includes(lodInfo.wireQuality) &&
       lodInfo.processedWires === 0,
     `overview=${lodInfo.overviewEdges}/${lodInfo.edges} wire=${lodInfo.wireQuality}/${lodInfo.processedWires}`)
 
@@ -2151,18 +2151,23 @@ async function main() {
     return {
       cards: cards?.dataset.interacting,
       cardVisibility: cards ? getComputedStyle(cards).visibility : '',
+      cardTransform: document.querySelector('.graph-card-stage')?.style.transform || '',
       wireQuality: document.querySelector('.graph-wire-underlay')?.dataset.quality,
       processedWires: Number(document.querySelector('.graph-wire-underlay')?.dataset.processedEdges || 0),
+      wireTransform: document.querySelector('.graph-wire-underlay')?.style.transform || '',
       socket: document.querySelector('.graph-socket-overlay')?.dataset.mode,
       labels: Number(document.querySelector('.graph-socket-overlay')?.dataset.labeledNodes || 0),
+      socketTransform: document.querySelector('.graph-socket-overlay')?.style.transform || '',
       signals: document.querySelector('.graph-signal-overlay')?.dataset.mode,
+      signalTransform: document.querySelector('.graph-signal-overlay')?.style.transform || '',
     }
   })()`)
-  check('AH8b pan suspends every decorative redraw layer',
-    interactionLayers.cards === 'true' && interactionLayers.cardVisibility === 'hidden' &&
-      interactionLayers.wireQuality === 'interaction-hidden' && interactionLayers.processedWires === 0 &&
-      interactionLayers.socket === 'interaction-paused' && interactionLayers.labels === 0 &&
-      interactionLayers.signals === 'interaction-paused',
+  check('AH8b pan keeps a visible compositor-proxied frame without redraws',
+    interactionLayers.cards === 'true' && interactionLayers.cardVisibility === 'visible' &&
+      interactionLayers.cardTransform !== '' &&
+      interactionLayers.wireQuality === 'interaction-frozen' && interactionLayers.wireTransform !== '' &&
+      interactionLayers.socket === 'interaction-frozen' && interactionLayers.socketTransform !== '' &&
+      interactionLayers.signals === 'interaction-frozen' && interactionLayers.signalTransform !== '',
     JSON.stringify(interactionLayers))
   await cdp.eval(`(() => {
     const host = document.querySelector('.graph-card-layer')?.parentElement
