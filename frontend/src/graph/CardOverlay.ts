@@ -297,8 +297,16 @@ export class CardOverlay {
   }
 
   private onInteraction = (event: Event): void => {
-    this.interacting = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    if (active === this.interacting) return
+    this.interacting = active
     this.root.dataset.interacting = this.interacting ? 'true' : 'false'
+    if (active) {
+      if (this.raf) cancelAnimationFrame(this.raf)
+      this.raf = 0
+      perf.setOverlayRaf('cards', false)
+      return
+    }
     this.requestDraw()
   }
 
@@ -343,7 +351,7 @@ export class CardOverlay {
   }
 
   private requestDraw = (): void => {
-    if (this.destroyed || this.raf) return
+    if (this.destroyed || this.interacting || this.raf) return
     perf.setOverlayRaf('cards', true)
     this.raf = requestAnimationFrame(() => {
       this.raf = 0

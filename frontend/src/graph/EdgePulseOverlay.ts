@@ -125,6 +125,7 @@ export class EdgePulseOverlay {
   private stops = 0
   private testMuted = false
   private enabled = true
+  private interacting = false
   private signalTimers = new Map<string, number>()
   private ro: ResizeObserver
 
@@ -140,9 +141,32 @@ export class EdgePulseOverlay {
     const ctx = this.canvas.getContext('2d')
     if (!ctx) throw new Error('canvas 2d unavailable')
     this.ctx = ctx
+    this.canvas.dataset.mode = 'live'
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(container)
+    container.addEventListener('esw:interaction', this.onInteraction)
     this.resize()
+  }
+
+  private hasVisualWork(): boolean {
+    return this.activity.size > 0 || this.recent.size > 0 || this.pulses.size > 0 ||
+      this.aiSignals.size > 0 || this.particles.length > 0 || this.aiParticles.length > 0
+  }
+
+  private onInteraction = (event: Event): void => {
+    const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    if (active === this.interacting) return
+    this.interacting = active
+    this.canvas.dataset.mode = active ? 'interaction-paused' : 'live'
+    if (active) {
+      cancelAnimationFrame(this.raf)
+      this.raf = 0
+      this.running = false
+      perf.setOverlayRaf('signals', false)
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+      return
+    }
+    if (this.hasVisualWork()) this.ensureRunning()
   }
 
   private resize(): void {
@@ -170,7 +194,7 @@ export class EdgePulseOverlay {
       kind,
       targetId,
     })
-    if (edge.length > 0 && !edge.removed()) {
+    if (!this.interacting && edge.length > 0 && !edge.removed()) {
       const color = PULSE_COLORS[kind]
       this.emitSignal(edge, 'source', 1, color)
       this.lightCable(edge, color, kind === 'close' ? 720 : 620)
@@ -312,7 +336,7 @@ export class EdgePulseOverlay {
   }
 
   private ensureRunning(): void {
-    if (this.enabled && !this.running) {
+    if (this.enabled && !this.interacting && !this.running) {
       this.running = true
       perf.setOverlayRaf('signals', true)
       this.loop()
@@ -660,7 +684,10 @@ export class EdgePulseOverlay {
     if (this.enabled === on) return
     this.enabled = on
     this.container.classList.toggle('flow-disabled', !on)
-    if (on) return
+    if (on) {
+      if (this.hasVisualWork()) this.ensureRunning()
+      return
+    }
     cancelAnimationFrame(this.raf)
     this.running = false
     perf.setOverlayRaf('signals', false)
@@ -679,6 +706,7 @@ export class EdgePulseOverlay {
   }
 
   destroy(): void {
+    this.container.removeEventListener('esw:interaction', this.onInteraction)
     if (this.enabled) this.setEnabled(false)
     else cancelAnimationFrame(this.raf)
     perf.setOverlayRaf('signals', false)
@@ -694,6 +722,10 @@ export class EdgePulseOverlay {
    * canvas/UI state; never touches telemetry or the DOM graph.
    */
   testForceIdle(): void {
+    cancelAnimationFrame(this.raf)
+    this.raf = 0
+    this.running = false
+    perf.setOverlayRaf('signals', false)
     this.activity.clear()
     this.activityOrder = []
     this.particles = []
@@ -701,6 +733,7 @@ export class EdgePulseOverlay {
     this.recent.clear()
     this.aiSignals.clear()
     this.aiParticles = []
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
   }
 
   /**
@@ -714,6 +747,10 @@ export class EdgePulseOverlay {
   testMute(muted: boolean): void {
     this.testMuted = muted
     if (!muted) return
+    cancelAnimationFrame(this.raf)
+    this.raf = 0
+    this.running = false
+    perf.setOverlayRaf('signals', false)
     this.activity.clear()
     this.activityOrder = []
     this.particles = []
@@ -721,6 +758,7 @@ export class EdgePulseOverlay {
     this.recent.clear()
     this.aiSignals.clear()
     this.aiParticles = []
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
   }
 
   /**

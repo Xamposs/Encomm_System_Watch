@@ -1137,8 +1137,8 @@ body,
   display: none;
 }
 
-.graph-card-layer[data-interacting='true'] .graph-card {
-  will-change: transform;
+.graph-card-layer[data-interacting='true'] {
+  visibility: hidden;
 }
 
 .graph-card {

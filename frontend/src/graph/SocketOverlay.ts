@@ -110,7 +110,18 @@ export class SocketOverlay {
   }
 
   private onInteraction = (event: Event): void => {
-    this.interacting = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    if (active === this.interacting) return
+    this.interacting = active
+    if (active) {
+      if (this.raf) cancelAnimationFrame(this.raf)
+      this.raf = 0
+      perf.setOverlayRaf('sockets', false)
+      this.ctx.clearRect(0, 0, this.cssW, this.cssH)
+      this.canvas.dataset.mode = 'interaction-paused'
+      this.canvas.dataset.labeledNodes = '0'
+      return
+    }
     this.requestDraw()
   }
 
@@ -130,7 +141,7 @@ export class SocketOverlay {
   }
 
   private requestDraw = (): void => {
-    if (this.destroyed) return
+    if (this.destroyed || this.interacting) return
     if (this.raf) return
     perf.setOverlayRaf('sockets', true)
     this.raf = requestAnimationFrame(() => {
@@ -183,6 +194,12 @@ export class SocketOverlay {
     const cy = this.cy
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.cssW, this.cssH)
+    if (this.interacting) {
+      this.canvas.dataset.mode = 'interaction-paused'
+      this.canvas.dataset.labeledNodes = '0'
+      perf.recordOverlayDraw('socket', performance.now() - started)
+      return
+    }
     const zoom = cy.zoom()
     const cardLod = this.container.querySelector<HTMLElement>('.graph-card-layer')?.dataset.mode
     if (zoom < 0.5 || cardLod === 'mid' || cardLod === 'far') {
@@ -235,14 +252,10 @@ export class SocketOverlay {
       perf.recordOverlayDraw('socket', performance.now() - started)
       return
     }
-    this.canvas.dataset.mode = this.interacting ? 'interaction-paused' : 'near-sockets'
+    this.canvas.dataset.mode = 'near-sockets'
     this.canvas.dataset.labeledNodes = '0'
     delete this.canvas.dataset.cardWidth
     delete this.canvas.dataset.cardHeight
-    if (this.interacting) {
-      perf.recordOverlayDraw('socket', performance.now() - started)
-      return
-    }
     const nodes = cy.nodes(':visible')
     if (nodes.length === 0 || nodes.length > 3000) {
       perf.recordOverlayDraw('socket', performance.now() - started)

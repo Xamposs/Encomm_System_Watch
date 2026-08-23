@@ -321,11 +321,21 @@ export const STYLESHEET: StylesheetStyle[] = [
   { selector: 'node.fading', style: { opacity: 0 } },
   { selector: 'node.no-labels', style: { label: '' } }, // hide labels at low zoom
   // ---- large-graph LOD + benchmark markers (v0.3.1) ----------------------
+  // Overview zoom: every real relationship remains visible, but straight,
+  // arrowless hairlines avoid recalculating hundreds of bezier curves.
+  {
+    selector: 'edge.lod-overview',
+    style: {
+      'curve-style': 'straight', 'target-arrow-shape': 'none',
+      'line-style': 'solid', opacity: 0.22, width: 0.7,
+      'overlay-padding': 2, 'transition-duration': 0,
+    },
+  },
   // far zoom: arrowheads are invisible — drop the geometry so dense graphs
   // render cheaply; edges thin out and subdue
   {
     selector: 'edge.lod-far',
-    style: { 'target-arrow-shape': 'none', 'arrow-scale': 0, opacity: 0.35, width: 0.8 },
+    style: { 'target-arrow-shape': 'none', opacity: 0.25, width: 0.65 },
   },
   // synthetic TEST/BENCHMARK fixture nodes: same visual language, dashed
   // border marks them as non-real (never present in normal mode)
@@ -504,6 +514,7 @@ interface ViewLayoutCacheEntry {
 type CameraTarget = 'overview' | 'current'
 
 const ZOOM_FAR = 0.09
+const ZOOM_EDGE_OVERVIEW = 0.18
 const ZOOM_CLOSE = 0.5
 
 // incremental-layout policy (v0.3.1): on large graphs, small node additions
@@ -568,6 +579,7 @@ export class GraphController {
   private view: 'system' | 'ai' | 'infra' = 'system'
   private benchmarkMode = false
   private lodFar = false
+  private lodOverview = false
   /** last label actually written per node (avoids redundant cytoscape
    * dirtying on every metrics tick — v0.3.1 large-graph optimization) */
   private labelCache = new Map<string, string>()
@@ -614,6 +626,12 @@ export class GraphController {
       this.pendingNewNodes += 1
       this.scheduleIncrementalLayout()
     })
+    cy.on('add', 'edge', (ev) => {
+      // Keep live topology additions in the current camera LOD without
+      // waiting for the user to cross a zoom threshold again.
+      ev.target.toggleClass('lod-overview', this.lodOverview)
+      ev.target.toggleClass('lod-far', this.lodFar)
+    })
     cy.on('mouseover', 'edge', (ev) => this.showTooltip(ev.target as EdgeSingular))
     cy.on('mouseout', 'edge', () => this.hideTooltip())
     cy.on('zoom', () => {
@@ -644,6 +662,7 @@ export class GraphController {
   private markInteraction = (): void => {
     if (!this.interacting) {
       this.interacting = true
+      this.hideTooltip()
       this.cy.container()?.dispatchEvent(new CustomEvent('esw:interaction', { detail: { active: true } }))
     }
     if (this.interactionTimer !== undefined) window.clearTimeout(this.interactionTimer)
@@ -1644,10 +1663,14 @@ export class GraphController {
    * drop arrow geometry and thin edges so dense graphs render cheaply.
    */
   private updateEdgeLod(): void {
-    const far = this.cy.zoom() < ZOOM_FAR
-    if (far === this.lodFar) return
+    const zoom = this.cy.zoom()
+    const far = zoom < ZOOM_FAR
+    const overview = zoom < ZOOM_EDGE_OVERVIEW
+    if (far === this.lodFar && overview === this.lodOverview) return
     this.lodFar = far
+    this.lodOverview = overview
     this.cy.batch(() => {
+      this.cy.edges().toggleClass('lod-overview', overview)
       this.cy.edges().toggleClass('lod-far', far)
     })
   }

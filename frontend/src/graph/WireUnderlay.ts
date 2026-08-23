@@ -109,7 +109,20 @@ export class WireUnderlay {
   }
 
   private onInteraction = (event: Event): void => {
-    this.interacting = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+    if (active === this.interacting) return
+    this.interacting = active
+    if (active) {
+      if (this.raf) cancelAnimationFrame(this.raf)
+      if (this.drawTimer !== undefined) window.clearTimeout(this.drawTimer)
+      this.raf = 0
+      this.drawTimer = undefined
+      perf.setOverlayRaf('wires', false)
+      this.ctx.clearRect(0, 0, this.cssW, this.cssH)
+      this.canvas.dataset.quality = 'interaction-hidden'
+      this.canvas.dataset.processedEdges = '0'
+      return
+    }
     this.requestDraw()
   }
 
@@ -129,10 +142,10 @@ export class WireUnderlay {
   }
 
   private requestDraw = (): void => {
-    if (this.destroyed || this.raf || this.drawTimer !== undefined) return
+    if (this.destroyed || this.interacting || this.raf || this.drawTimer !== undefined) return
     // Decorative wire glow is intentionally capped at 20 fps. Geometry and
     // hit-testing remain native Cytoscape; this pass never needs 60 redraws/s.
-    const frameInterval = this.interacting ? 90 : 50
+    const frameInterval = 50
     const wait = Math.max(0, frameInterval - (performance.now() - this.lastDraw))
     perf.setOverlayRaf('wires', true)
     const schedule = (): void => {
@@ -168,12 +181,22 @@ export class WireUnderlay {
     const cy = this.cy
     const ctx = this.ctx
     ctx.clearRect(0, 0, this.cssW, this.cssH)
+    if (this.interacting) {
+      this.canvas.dataset.quality = 'interaction-hidden'
+      this.canvas.dataset.processedEdges = '0'
+      perf.recordOverlayDraw('wire', performance.now() - started)
+      return
+    }
     if (cy.nodes().length === 0) {
       perf.recordOverlayDraw('wire', performance.now() - started)
       return
     }
     const zoom = cy.zoom()
-    const quality = this.interacting ? 'interaction' : zoom < 0.16 ? 'far' : zoom < 0.58 ? 'mid' : 'near'
+    // Below overview zoom the native edge layer already carries all topology.
+    // A second glow pass is sub-pixel, visually noisy and needlessly doubles
+    // the most expensive part of FIT ALL rendering.
+    const overview = zoom < 0.18
+    const quality = overview ? 'overview-native' : zoom < 0.58 ? 'mid' : 'near'
     this.canvas.dataset.quality = quality
     const pan = cy.pan()
     const toX = (mx: number): number => mx * zoom + pan.x
@@ -183,12 +206,12 @@ export class WireUnderlay {
     const edges = cy.edges(':visible')
     // defensive cap: huge fixture graphs skip the decorative pass
     let processed = 0
-    if (edges.length <= 2600) {
+    if (!overview && edges.length <= 2600) {
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
       // At FIT ALL, painting every glow twice costs far more than the tiny
       // sub-pixel result. Keep a stable representative wire field instead.
-      const target = this.interacting ? 220 : zoom < 0.16 ? 320 : zoom < 0.58 ? 700 : 1500
+      const target = zoom < 0.58 ? 700 : 1500
       const stride = Math.max(1, Math.ceil(edges.length / target))
       for (let i = 0; i < edges.length; i += stride) {
         const e = edges[i]
@@ -216,7 +239,7 @@ export class WireUnderlay {
         else ctx.lineTo(tx, ty)
         ctx.stroke()
         // inner brighter pass -> soft neon falloff
-        if (!this.interacting && zoom >= 0.58) {
+        if (zoom >= 0.58) {
           ctx.globalAlpha = Math.min(0.78, alpha * 2.1)
           ctx.lineWidth = Math.max(0.9, 1.45 * zoom)
           ctx.stroke()
@@ -255,7 +278,6 @@ export class WireUnderlay {
     }
     const elapsed = performance.now() - started
     perf.recordOverlayDraw('wire', elapsed)
-    if (this.interacting) perf.recordInteractionFrame(elapsed)
   }
 
   destroy(): void {

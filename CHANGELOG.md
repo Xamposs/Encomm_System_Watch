@@ -34,6 +34,10 @@ relationships, or signals were added.
   quality once after a 160 ms settle window.
 
 ### Fixed
+- Zoom-out and pan no longer repaint duplicate wire glow, mini-card labels,
+  HTML cards, and live-flow particles on every gesture frame. Overview edges
+  use a truthful straight-line LOD, expensive decorative layers pause during
+  camera movement, and restore once after the 160 ms settle window.
 - Long-running live sessions no longer degrade into bare sockets, horizontal
   wires, and an overlapping localhost pile: NEAR LOD now falls back to fully
   labeled canvas cards when viewport density exceeds the DOM cap, new nodes

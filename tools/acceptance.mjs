@@ -2049,11 +2049,20 @@ async function main() {
     mounted: Number(document.querySelector('.graph-card-layer')?.dataset.mounted || 0),
     socket: document.querySelector('.graph-socket-overlay')?.dataset.mode,
     nodes: window.__esw_cy?.nodes(':visible').length || 0,
+    edges: window.__esw_cy?.edges().length || 0,
+    overviewEdges: window.__esw_cy?.edges('.lod-overview').length || 0,
+    wireQuality: document.querySelector('.graph-wire-underlay')?.dataset.quality,
+    processedWires: Number(document.querySelector('.graph-wire-underlay')?.dataset.processedEdges || 0),
   }))()`)
   const farLodInfo = lodInfo
   check('AH5 FAR LOD keeps a cheap mini-node representation',
     lodInfo.mode === 'far' && lodInfo.socket === 'far-mini' && lodInfo.nodes > 0,
     `mode=${lodInfo.mode} socket=${lodInfo.socket} nodes=${lodInfo.nodes}`)
+  check('AH5b overview removes duplicate glow and simplifies every real edge',
+    lodInfo.edges > 0 && lodInfo.overviewEdges === lodInfo.edges &&
+      ['overview-native', 'interaction-hidden'].includes(lodInfo.wireQuality) &&
+      lodInfo.processedWires === 0,
+    `overview=${lodInfo.overviewEdges}/${lodInfo.edges} wire=${lodInfo.wireQuality}/${lodInfo.processedWires}`)
 
   await cdp.eval(`(() => {
     const cy = window.__esw_cy
@@ -2135,6 +2144,32 @@ async function main() {
     !!(ps1 && ps1.wireDrawMs.count > 0 && Number(overlayBudget?.wire?.processedEdges || 0) <=
       Number(overlayBudget?.wire?.visibleEdges || 0)),
     `quality=${overlayBudget?.wire?.quality} processed=${overlayBudget?.wire?.processedEdges}/${overlayBudget?.wire?.visibleEdges}`)
+  const interactionLayers = await cdp.eval(`(() => {
+    const host = document.querySelector('.graph-card-layer')?.parentElement
+    host?.dispatchEvent(new CustomEvent('esw:interaction', { detail: { active: true } }))
+    const cards = document.querySelector('.graph-card-layer')
+    return {
+      cards: cards?.dataset.interacting,
+      cardVisibility: cards ? getComputedStyle(cards).visibility : '',
+      wireQuality: document.querySelector('.graph-wire-underlay')?.dataset.quality,
+      processedWires: Number(document.querySelector('.graph-wire-underlay')?.dataset.processedEdges || 0),
+      socket: document.querySelector('.graph-socket-overlay')?.dataset.mode,
+      labels: Number(document.querySelector('.graph-socket-overlay')?.dataset.labeledNodes || 0),
+      signals: document.querySelector('.graph-signal-overlay')?.dataset.mode,
+    }
+  })()`)
+  check('AH8b pan suspends every decorative redraw layer',
+    interactionLayers.cards === 'true' && interactionLayers.cardVisibility === 'hidden' &&
+      interactionLayers.wireQuality === 'interaction-hidden' && interactionLayers.processedWires === 0 &&
+      interactionLayers.socket === 'interaction-paused' && interactionLayers.labels === 0 &&
+      interactionLayers.signals === 'interaction-paused',
+    JSON.stringify(interactionLayers))
+  await cdp.eval(`(() => {
+    const host = document.querySelector('.graph-card-layer')?.parentElement
+    host?.dispatchEvent(new CustomEvent('esw:interaction', { detail: { active: false } }))
+    return true
+  })()`)
+  await sleep(180)
   check('AH9 SocketOverlay disables sockets at FAR zoom',
     farLodInfo.socket === 'far-mini' && farLodInfo.mounted === 0,
     `farMode=${farLodInfo.socket} mounted=${farLodInfo.mounted}`)
