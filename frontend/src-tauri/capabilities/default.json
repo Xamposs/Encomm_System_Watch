@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main ENCOMM SYSTEM WATCH window. Core defaults only — the shell exposes no commands, plugins or elevated permissions (read-only observability).",
+  "description": "Default capability for the main ENCOMM SYSTEM WATCH window. Core defaults plus the dialog plugin — used ONLY to surface startup errors (backend missing / port conflict). No commands, no elevated permissions, no remote-control surface (read-only observability).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

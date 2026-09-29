@@ -516,6 +516,8 @@ body,
   letter-spacing: 3px;
   color: var(--text-dim);
   animation: blink 1.4s ease-in-out infinite;
+  white-space: pre-line;
+  text-align: center;
 }
 
 .boot-overlay span.boot-err {

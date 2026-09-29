@@ -8,6 +8,7 @@ import { EventDrawer } from './components/EventDrawer'
 import { Legend } from './components/Legend'
 import { PerfPanel } from './components/PerfPanel'
 import type { Filter, SemanticView, ViewMode } from './types/system'
+import { isTauri } from './services/api'
 
 export default function App() {
   const {
@@ -15,6 +16,17 @@ export default function App() {
     selected, selectNode, drawerOpen, setDrawerOpen, telemetry,
     aiMetrics, aiProviders, aiFixture, controllerRef,
   } = useSystemWatch()
+  // Startup-state copy: inside the Tauri shell the Rust side is adopting or
+  // starting the backend, so the boot overlay speaks phase-accurate words.
+  // Browser mode keeps its original copy.
+  const engineDown = status === 'disconnected'
+  const bootText = isTauri()
+    ? engineDown
+      ? 'ENGINE LINK LOST — RETRYING…'
+      : 'STARTING OBSERVABILITY ENGINE…\nWAITING FOR BACKEND…'
+    : engineDown
+      ? 'LINK LOST — RETRYING…'
+      : 'ESTABLISHING LINK…'
   const [filter, setFilter] = useState<Filter>('all')
   const [search, setSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('nodes')
@@ -97,7 +109,7 @@ export default function App() {
         {!ready && (
           <div className="boot-overlay">
             <span className={status === 'disconnected' ? 'boot-err' : ''}>
-              {status === 'disconnected' ? 'LINK LOST — RETRYING…' : 'ESTABLISHING LINK…'}
+              {bootText}
             </span>
           </div>
         )}

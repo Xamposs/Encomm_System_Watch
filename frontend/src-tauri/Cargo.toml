@@ -1,6 +1,6 @@
 [package]
 name = "encomm-system-watch"
-version = "1.1.0"
+version = "1.2.0"
 description = "Native desktop shell for ENCOMM SYSTEM WATCH (Tauri v2). The Python/FastAPI observability engine on 127.0.0.1 remains the source of truth."
 authors = ["Xampos"]
 license = "MIT"
@@ -20,3 +20,4 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "^1", features = ["derive"] }
 serde_json = "^1"
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"

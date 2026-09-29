@@ -74,7 +74,13 @@ Prerequisites:
 # FIRST TIME / FRESH CLONE — one-time setup (venv + deps + production build)
 .\Setup-SystemWatch.ps1
 
-# RUN — production mode, one backend process serving the built UI
+# RUN — desktop app (recommended). The Tauri window starts the backend
+# automatically, waits until it is healthy, then loads the live map. On exit
+# it stops exactly the backend it started.
+cd frontend
+npm run tauri:dev
+
+# RUN — production browser mode, one backend process serving the built UI
 # (elevated PowerShell = full TIER2 ETW; non-admin = truthful TIER0)
 .\Start-SystemWatch.ps1
 
@@ -82,6 +88,13 @@ Prerequisites:
 #   http://127.0.0.1:8765
 # (the launcher opens the default browser unless you pass -NoBrowser)
 ```
+
+**Desktop vs browser:** the desktop app (`npm run tauri:dev`, or the packaged
+binary once built) manages the backend lifecycle itself — it reuses an
+already-healthy backend on `127.0.0.1:8765`, starts its own if the port is
+free, and reports a clear error if the port is held by a foreign application
+(it never kills foreign processes). The PowerShell launcher remains the
+manual/browser fallback and is unchanged.
 
 The launcher prints the live capability state on start, e.g.:
 
@@ -328,32 +341,50 @@ npm run typecheck
 
 ## Desktop / Tauri Development
 
-Phase 1 ships a **Tauri v2 desktop shell** around the existing React/Vite
-frontend (`frontend/src-tauri`). The shell is a passive WebView2 window — no
-Rust commands, no plugins, strictly read-only. The Python/FastAPI backend
-remains the single source of truth and binds `127.0.0.1:8765` only.
+Phase 1 shipped a **Tauri v2 desktop shell** around the existing React/Vite
+frontend (`frontend/src-tauri`). Phase 2 makes it **fully self-starting**: the
+shell is no longer passive — it owns the backend lifecycle.
+
+What the desktop app does on launch:
+
+1. Checks `http://127.0.0.1:8765/api/health`.
+2. Backend already healthy → **reuses it** (records `backend_owned = false`);
+   on exit the external backend is left untouched.
+3. Port free → **starts the backend itself**
+   (`backend\.venv\Scripts\python.exe -m uvicorn app.main:app
+   --host 127.0.0.1 --port 8765`, `backend_owned = true`), waits up to ~45 s
+   for health, then the UI connects automatically.
+4. Port held by a non-SYSTEM-WATCH application → **clear startup error**, the
+   foreign process is never touched.
+5. On window close, only an **owned** backend is stopped (exact process
+   handle — no PID sweeping).
+
+The while-booting UI shows a minimal startup state
+(`STARTING OBSERVABILITY ENGINE… / WAITING FOR BACKEND…`) instead of an empty
+disconnected graph; the normal app loads once the backend is healthy.
 
 Prerequisites:
 
 - **Rust** (stable) — install via <https://rustup.rs> (`rustup default stable`)
 - **Node.js 18+** and the frontend deps: `cd frontend && npm install`
 - **Microsoft Edge WebView2 Runtime** — preinstalled on Windows 11
-- The backend running (see Quick start above), e.g.:
+- **One-time setup** for the backend: `.\Setup-SystemWatch.ps1`
+  (creates `backend\.venv`; the desktop app does **not** install packages at
+  launch — if the venv is missing it fails with
+  "Backend environment not found. Run Setup-SystemWatch.ps1 first.")
 
-```powershell
-.\Start-SystemWatch.ps1 -NoBrowser
-```
-
-Start the desktop app (Vite dev server + Tauri window):
+Start the desktop app (Vite dev server + Tauri window + auto-started backend):
 
 ```powershell
 cd frontend
 npm run tauri:dev
 ```
 
-The window connects straight to the running backend on `ws://127.0.0.1:8765`
-(dev mode routes through the Vite proxy). Browser mode is **unchanged** and
-continues to work exactly as before:
+No manual backend start is needed anymore — `npm run tauri:dev` starts it
+automatically. The window connects to the backend on `ws://127.0.0.1:8765`
+(dev mode routes through the Vite proxy).
+
+Browser/manual mode is **unchanged** and continues to work exactly as before:
 
 ```powershell
 .\Start-SystemWatch.ps1
@@ -361,8 +392,11 @@ continues to work exactly as before:
 ```
 
 `npm run tauri:build` produces a release desktop binary (add `-- --no-bundle`
-to skip the installer). Bundling the backend as a managed Tauri sidecar — so
-the desktop app starts/stops it automatically — is planned for the next phase.
+to skip the installer). Startup diagnostics go to `backend\esw-backend.log`,
+`backend\esw-backend.err.log` and `backend\esw-desktop.log` (all git-ignored).
+`ESW_PROJECT_ROOT` is an optional environment override pointing the desktop
+app at the project folder when it cannot find it by walking up from its own
+binary (e.g. a manually placed packaged build).
 
 ## Acceptance driver
 

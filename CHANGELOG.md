@@ -2,6 +2,57 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [1.2.0] — 2026-09-29
+
+### Added
+- **Automatic backend lifecycle management (Phase 2)** — the Tauri desktop
+  app (`frontend/src-tauri`) is now fully self-starting. Launching the app
+  (or `npm run tauri:dev`) automatically brings the backend up:
+  - reuses an already-healthy backend on `127.0.0.1:8765`
+    (`backend_owned = false`) and leaves it untouched on exit;
+  - starts its own backend when the port is free — a direct process launch
+    of `backend\.venv\Scripts\python.exe -m uvicorn app.main:app --host
+    127.0.0.1 --port 8765` (no PowerShell, no shell parsing), polls
+    `/api/health` through a ~45 s bounded health gate, and stops ONLY the
+    process it started (exact `Child` handle + `taskkill /PID <owned> /T /F`
+    tree fallback — no PID sweeping, no unrelated kills);
+  - surfaces a clear startup error (message dialog + `backend\esw-desktop.log`
+    record) when port 8765 is held by a foreign application (process left
+    untouched), when `backend\.venv` is missing ("Backend environment not
+    found. Run Setup-SystemWatch.ps1 first."), on spawn failure, and on
+    health-gate timeout (with `esw-backend.log` / `esw-backend.err.log`
+    tails).
+- `frontend/src-tauri/src/backend_manager.rs` — a small, auditable backend
+  lifecycle module: locate python → probe health → detect port conflict →
+  spawn → health gate → stop owned → startup status log.
+- Startup UX in Tauri mode: the boot overlay now shows
+  "STARTING OBSERVABILITY ENGINE…/WAITING FOR BACKEND…" while the engine
+  boots, then loads the normal app (browser-mode copy unchanged).
+- Equivalent diagnostic logging to the PowerShell launcher:
+  `backend\esw-backend.log` / `backend\esw-backend.err.log` (truncated at
+  start) plus a lifecycle record in `backend\esw-desktop.log` — all
+  git-ignored.
+- `ESW_PROJECT_ROOT` environment override for locating the project when the
+  app cannot find it by walking up from its own binary (packaged/manual
+  placements).
+- Dialog plugin capability (`dialog:default`) — used ONLY to surface startup
+  errors; no commands, no shell, no elevated permissions (the read-only
+  guarantee is intact).
+
+### Changed
+- Version bumped to 1.2.0 (`frontend/package.json`,
+  `frontend/package-lock.json`, `backend/app/main.py`, `frontend/src-tauri`
+  Cargo.toml + tauri.conf.json).
+- README: desktop instructions now state that `npm run tauri:dev` starts the
+  backend automatically and no longer require a manual
+  `Start-SystemWatch.ps1 -NoBrowser` first; browser/manual mode remains
+  available and unchanged.
+
+### Notes / next phase
+- Python standalone packaging / sidecar bundling, installer polish, system
+  tray, Windows auto-start, auto-updater, native notifications, history
+  recorder, AI investigator and UI redesign remain separate future phases.
+
 ## [1.1.0] — 2026-09-29
 
 ### Added
