@@ -738,12 +738,14 @@ async def lifespan(_: FastAPI):
         telemetry_provider.stop()
 
 
-app = FastAPI(title="ENCOMM SYSTEM WATCH", version="1.0.3", lifespan=lifespan)
+app = FastAPI(title="ENCOMM SYSTEM WATCH", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://127.0.0.1:5173", "http://localhost:5173",
         "http://127.0.0.1:8765", "http://localhost:8765",
+        # Tauri v2 desktop shell asset origin (resolves to loopback only)
+        "http://tauri.localhost",
     ],
     allow_methods=["GET"],
     allow_headers=["*"],

@@ -1,0 +1,22 @@
+[package]
+name = "encomm-system-watch"
+version = "1.1.0"
+description = "Native desktop shell for ENCOMM SYSTEM WATCH (Tauri v2). The Python/FastAPI observability engine on 127.0.0.1 remains the source of truth."
+authors = ["Xampos"]
+license = "MIT"
+edition = "2021"
+
+# The desktop shell is a passive WebView2 window: no plugins, no exposed
+# commands. The crate only needs the core tauri runtime to create the window
+# and serve the existing React/Vite frontend (see tauri.conf.json).
+[lib]
+name = "encomm_system_watch_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "^1", features = ["derive"] }
+serde_json = "^1"
+tauri = { version = "2", features = [] }

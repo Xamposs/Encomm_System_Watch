@@ -2,6 +2,31 @@
 
 All notable changes to ENCOMM SYSTEM WATCH are recorded here.
 
+## [1.1.0] — 2026-09-29
+
+### Added
+- **Initial Tauri desktop shell (Phase 1)** — a native WebView2 window
+  (`frontend/src-tauri`, Tauri v2) around the existing React/Vite frontend.
+  Window: "ENCOMM SYSTEM WATCH", 1600×1000, resizable/maximizable, dark
+  theme, `#05070a` background. No Rust commands or plugins are exposed — the
+  shell is passive and strictly read-only; the Python/FastAPI backend remains
+  the single source of truth on `127.0.0.1:8765`.
+- Runtime backend-origin resolution for the desktop window: inside Tauri the
+  WebSocket feed is addressed directly to `ws://127.0.0.1:8765/ws`; browser
+  mode stays same-origin (Vite proxy / backend-served) and is unchanged.
+  `http://tauri.localhost` added to the backend CORS allow-list (preventive;
+  WebSocket connectivity does not require CORS).
+- npm scripts: `tauri`, `tauri:dev`, `tauri:build`, `tauri:icon`.
+
+### Changed
+- Version bumped to 1.1.0 (`frontend/package.json`,
+  `frontend/package-lock.json`, `backend/app/main.py`, `frontend/src-tauri`).
+
+### Notes / next phase
+- Automatic backend bundling/sidecar management, installer generation, system
+  tray, auto-start and native notifications are intentionally NOT part of
+  this phase.
+
 ## [1.0.3] — 2026-08-22
 
 PERFORMANCE + VIEW-GEOMETRY HOTFIX. Telemetry semantics, collectors, graph

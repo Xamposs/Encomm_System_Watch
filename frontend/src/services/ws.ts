@@ -1,4 +1,5 @@
 import type { ConnectionStatus, ServerMessage } from '../types/system'
+import { wsUrl } from './api'
 
 /**
  * WebSocket client with automatic reconnect + dead-link watchdog.
@@ -24,8 +25,7 @@ export class WatchSocket {
 
   private open(): void {
     this.onStatus('connecting')
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/ws`)
+    const ws = new WebSocket(wsUrl())
     this.ws = ws
 
     ws.onopen = () => {

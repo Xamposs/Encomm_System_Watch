@@ -326,6 +326,44 @@ npm run build        # tsc --noEmit && vite build
 npm run typecheck
 ```
 
+## Desktop / Tauri Development
+
+Phase 1 ships a **Tauri v2 desktop shell** around the existing React/Vite
+frontend (`frontend/src-tauri`). The shell is a passive WebView2 window — no
+Rust commands, no plugins, strictly read-only. The Python/FastAPI backend
+remains the single source of truth and binds `127.0.0.1:8765` only.
+
+Prerequisites:
+
+- **Rust** (stable) — install via <https://rustup.rs> (`rustup default stable`)
+- **Node.js 18+** and the frontend deps: `cd frontend && npm install`
+- **Microsoft Edge WebView2 Runtime** — preinstalled on Windows 11
+- The backend running (see Quick start above), e.g.:
+
+```powershell
+.\Start-SystemWatch.ps1 -NoBrowser
+```
+
+Start the desktop app (Vite dev server + Tauri window):
+
+```powershell
+cd frontend
+npm run tauri:dev
+```
+
+The window connects straight to the running backend on `ws://127.0.0.1:8765`
+(dev mode routes through the Vite proxy). Browser mode is **unchanged** and
+continues to work exactly as before:
+
+```powershell
+.\Start-SystemWatch.ps1
+# then open http://127.0.0.1:8765
+```
+
+`npm run tauri:build` produces a release desktop binary (add `-- --no-bundle`
+to skip the installer). Bundling the backend as a managed Tauri sidecar — so
+the desktop app starts/stops it automatically — is planned for the next phase.
+
 ## Acceptance driver
 
 `tools/acceptance.mjs` runs the full A–Z acceptance suite (startup, real

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the main ENCOMM SYSTEM WATCH window. Core defaults only — the shell exposes no commands, plugins or elevated permissions (read-only observability).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
